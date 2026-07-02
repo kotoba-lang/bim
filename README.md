@@ -1,14 +1,29 @@
 # kotoba-lang/bim
 
-Zero-dep portable `.cljc` — restored from the legacy `kami-engine/kami-bim` Rust crate
-(deleted in the kotoba-lang Rust removal) as part of the **clj-wgsl migration** (ADR-2607010930,
+Zero-dep portable `.cljc` — restored from the legacy `kami-engine/kami-bim`
+Rust crate (deleted in kotoba-lang/kami-engine PR #82 "Remove Rust workspace
+from kami-engine") as part of the **clj-wgsl migration** (ADR-2607010930,
 `com-junkawasaki/root`).
+
+KAMI BIM: an IFC-like model for building authoring. Spatial hierarchy
+(Project -> Site -> Building -> Storey -> Space), element taxonomy
+(Wall/Slab/Column/Beam/Door/Window/Roof/Stair/Railing/Furniture/
+MepSegment/Opening), PropertySet (Pset_*) and Qto_* quantities (IFC
+convention), material/layer/classification, and a link to
+`kotoba-lang/brep` for element geometry (BREP body or Axis+Profile
+sweep) plus a scene-projection format for storey-LOD rendering.
+
+Depends on `kotoba-lang/brep` for element BREP geometry.
 
 ## Status
 
-Scaffold only — the CLJC restoration is pending. This repo provides the home for the
-zero-dep portable `.cljc` contracts / data interpreters / EDN IR that replace the deleted
-Rust crate. Native execution (wgpu / wasmtime / wasmi) stays substrate.
+Restored — the single-namespace data model ported from the original
+465-line Rust `lib.rs`, with both original Rust unit tests mirrored 1:1
+in `test/bim_test.cljc` (+1 smoke test) — 3 tests / 6 assertions, 0
+failures. Pure data + pure functions throughout; no IO/GPU. The
+original's serde-JSON round-trip test is adapted to a direct nested-
+hierarchy construction check — EDN maps are already the data, no
+serialize/deserialize step is needed to prove the model holds together.
 
 ## Develop
 
