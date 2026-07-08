@@ -6,7 +6,7 @@
 
 (deftest namespace-loads
   (testing "the restored CLJC namespace loads"
-    (is (some? (the-ns 'bim)))))
+    (is (some? (find-ns 'bim)))))
 
 ;; mirrors `project_roundtrip` — the original round-trips through
 ;; serde_json to prove the model holds together; in CLJC the EDN map IS
