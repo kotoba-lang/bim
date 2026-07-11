@@ -38,3 +38,20 @@
                                                                                      :spaces [] :elements []})]})]})))]
     (is (some? (bim/find-storey p storey-id)))
     (is (nil? (bim/find-storey p 999)))))
+
+(deftest editable-wall-model-and-mesh
+  (let [base (-> (bim/project "Editor")
+                 (update :sites conj
+                         (bim/site {:id 1 :name "Site" :geo nil :placement :identity
+                                    :buildings [(bim/building {:id 2 :name "B" :placement :identity
+                                                                :reference-elevation 0 :storeys
+                                                                [(bim/storey {:id 3 :name "GF" :elevation 0 :height 3
+                                                                              :placement :identity :spaces [] :elements []})]})]})))
+        w (bim/wall {:id 10 :start [0 0 0] :end [8 0 0] :thickness 0.25 :height 3.2})
+        with-wall (bim/add-element base 3 w)
+        mesh (bim/wall-mesh w)]
+    (is (= 1 (count (:elements (bim/find-storey with-wall 3)))))
+    (is (= 8.0 (get-in w [:quantities :length-m])))
+    (is (= 8 (count (:positions mesh))))
+    (is (= 36 (count (:indices mesh))))
+    (is (empty? (:elements (bim/find-storey (bim/delete-element with-wall 3 10) 3))))))

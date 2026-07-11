@@ -59,6 +59,8 @@
   #{:wall :slab :roof :column :beam :door :window :stair :railing :curtain
     :furniture :mep-segment :opening :other})
 
+(defn- sqrt [x] #?(:clj (Math/sqrt x) :cljs (js/Math.sqrt x)))
+
 (defn element [{:keys [id kind name global-id placement geometry material-layers
                         classification quantities psets openings connected-to]}]
   {:id id :kind kind :name name :global-id global-id :placement placement :geometry geometry
@@ -146,3 +148,68 @@
                   (some (fn [st] (when (= (:id st) id) st)) (:storeys b)))
                 (:buildings s)))
         (:sites proj)))
+
+(defn- update-storey* [proj storey-id f]
+  (update proj :sites
+          (fn [sites]
+            (mapv (fn [s]
+                    (update s :buildings
+                            (fn [buildings]
+                              (mapv (fn [b]
+                                      (update b :storeys
+                                              (fn [storeys]
+                                                (mapv #(if (= storey-id (:id %)) (f %) %) storeys))))
+                                    buildings))))
+                  sites))))
+
+(defn add-element [proj storey-id elem]
+  (when-not (find-storey proj storey-id)
+    (throw (ex-info "storey not found" {:storey-id storey-id})))
+  (update-storey* proj storey-id #(update % :elements conj elem)))
+
+(defn update-element [proj storey-id element-id f & args]
+  (update-storey* proj storey-id
+                   #(update % :elements
+                            (fn [elements]
+                              (mapv (fn [e] (if (= element-id (:id e))
+                                              (apply f e args) e)) elements)))))
+
+(defn delete-element [proj storey-id element-id]
+  (update-storey* proj storey-id
+                   #(update % :elements
+                            (fn [elements] (vec (remove (fn [e] (= element-id (:id e))) elements))))))
+
+(defn wall
+  [{:keys [id name start end thickness height material]
+    :or {name "Wall" thickness 0.2 height 3.0 material "Concrete"}}]
+  (element {:id id :kind :wall :name name :global-id (str id) :placement :identity
+            :geometry (axis-sweep-geometry [start end] (rectangle-profile thickness height))
+            :material-layers [(material-layer material thickness false :concrete)]
+            :classification (classification-ref "Uniclass" "Ss_25_10" "Wall systems")
+            :quantities (quantities {:length-m (sqrt (+ (let [d (- (first end) (first start))] (* d d))
+                                                        (let [d (- (second end) (second start))] (* d d))))})
+            :psets {"Pset_WallCommon" (property-set "Pset_WallCommon" {:IsExternal (bool-value true)})}
+            :openings [] :connected-to []}))
+
+(defn wall-mesh
+  "Convert a horizontal axis-sweep rectangle wall into an indexed box mesh."
+  [{:keys [geometry]}]
+  (let [[[x0 y0 z0] [x1 y1 _]] (:axis geometry)
+        {:keys [thickness height]} (:profile geometry)
+        dx (- x1 x0) dy (- y1 y0) len (sqrt (+ (* dx dx) (* dy dy)))
+        px (* (/ (- dy) len) (/ thickness 2)) py (* (/ dx len) (/ thickness 2))
+        positions [[(+ x0 px) (+ y0 py) z0] [(- x0 px) (- y0 py) z0]
+                   [(+ x1 px) (+ y1 py) z0] [(- x1 px) (- y1 py) z0]
+                   [(+ x0 px) (+ y0 py) (+ z0 height)] [(- x0 px) (- y0 py) (+ z0 height)]
+                   [(+ x1 px) (+ y1 py) (+ z0 height)] [(- x1 px) (- y1 py) (+ z0 height)]]
+        indices [0 2 1 1 2 3, 4 5 6 5 7 6, 0 4 2 2 4 6,
+                 1 3 5 3 7 5, 0 1 4 1 5 4, 2 6 3 3 6 7]]
+    {:positions positions :indices indices :normals (vec (repeat 8 [0 0 1]))}))
+
+(defn merge-meshes [meshes]
+  (loop [remaining meshes positions [] normals [] indices []]
+    (if-let [m (first remaining)]
+      (let [offset (count positions)]
+        (recur (next remaining) (into positions (:positions m)) (into normals (:normals m))
+               (into indices (map #(+ offset %) (:indices m)))))
+      {:positions (vec positions) :normals (vec normals) :indices (vec indices)})))
