@@ -374,3 +374,53 @@
         (recur (next remaining) (into positions (:positions m)) (into normals (:normals m))
                (into indices (map #(+ offset %) (:indices m)))))
       {:positions (vec positions) :normals (vec normals) :indices (vec indices)})))
+
+;; ── coordination / clash detection ──
+(defn element-bounds
+  "Axis-aligned world bounds for an element with generated geometry."
+  [element]
+  (when-let [positions (:positions (element-mesh element))]
+    (when (seq positions)
+      (let [axes (apply map vector positions)]
+        {:min (mapv #(reduce min %) axes) :max (mapv #(reduce max %) axes)}))))
+
+(defn- intentional-relationship? [a b]
+  (or (some #{(:id b)} (:connected-to a))
+      (some #{(:id a)} (:connected-to b))
+      (some #(= (:filled-by %) (:id b)) (:openings a))
+      (some #(= (:filled-by %) (:id a)) (:openings b))))
+
+(defn clash
+  "Return a clash record for two elements, or nil. Touching faces and gaps
+  within tolerance are not clashes; intentional host/fill relationships are
+  excluded by default."
+  ([a b] (clash a b {}))
+  ([a b {:keys [tolerance include-related?] :or {tolerance 1.0e-6 include-related? false}}]
+   (when (neg? tolerance) (throw (ex-info "clash tolerance cannot be negative" {:tolerance tolerance})))
+   (when (and (not= (:id a) (:id b)) (or include-related? (not (intentional-relationship? a b))))
+   (when-let [ba (element-bounds a)]
+     (when-let [bb (element-bounds b)]
+       (let [overlap (mapv (fn [amax amin bmax bmin]
+                             (- (min amax bmax) (max amin bmin)))
+                           (:max ba) (:min ba) (:max bb) (:min bb))]
+         (when (every? #(< tolerance %) overlap)
+           {:clash/a (:id a) :clash/b (:id b) :clash/kinds [(:kind a) (:kind b)]
+            :clash/overlap overlap :clash/volume (reduce * overlap)
+            :clash/bounds {:min (mapv max (:min ba) (:min bb))
+                           :max (mapv min (:max ba) (:max bb))}})))))))
+
+(defn detect-clashes
+  "Detect geometry clashes storey-by-storey. Pair ids are deterministic and
+  each unordered pair appears once."
+  ([project] (detect-clashes project {}))
+  ([project options]
+   (vec (mapcat (fn [site]
+                  (mapcat (fn [building]
+                            (mapcat (fn [storey]
+                                      (keep (fn [[a b]]
+                                              (when-let [result (clash a b options)]
+                                                (assoc result :clash/storey (:id storey))))
+                                            (for [i (range (count (:elements storey)))
+                                                  j (range (inc i) (count (:elements storey)))]
+                                              [(nth (:elements storey) i) (nth (:elements storey) j)])))
+                                    (:storeys building))) (:buildings site))) (:sites project)))))

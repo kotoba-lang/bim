@@ -120,3 +120,26 @@
     (is (= "Living Room" (:name (first (:spaces (bim/find-storey renamed 3))))))
     (is (empty? (:spaces (bim/find-storey (bim/delete-space renamed 3 50) 3))))
     (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error) (bim/add-space added 3 room)))))
+
+(deftest deterministic-bim-clash-detection
+  (let [ground (bim/storey {:id 3 :name "Ground" :elevation 0 :height 3 :placement :identity :spaces []
+                            :elements [(bim/wall {:id 10 :start [0 0 0] :end [6 0 0] :thickness 0.3 :height 3})
+                                       (bim/wall {:id 11 :start [2 -2 0] :end [2 2 0] :thickness 0.3 :height 3})
+                                       (bim/wall {:id 12 :start [0 5 0] :end [6 5 0] :thickness 0.3 :height 3})]})
+        project (-> (bim/project "Coordination")
+                    (update :sites conj (bim/site {:id 1 :name "Site" :placement :identity :buildings
+                                                   [(bim/building {:id 2 :name "B" :placement :identity
+                                                                   :reference-elevation 0 :storeys [ground]})]})))
+        clashes (bim/detect-clashes project)]
+    (is (= 1 (count clashes)))
+    (is (= [10 11] ((juxt :clash/a :clash/b) (first clashes))))
+    (is (= 3 (:clash/storey (first clashes))))
+    (is (pos? (:clash/volume (first clashes))))
+    (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+                 (bim/detect-clashes project {:tolerance -1})))))
+
+(deftest hosted-elements-are-not-false-positive-clashes
+  (let [wall (bim/wall {:id 10 :start [0 0 0] :end [5 0 0]})
+        hosted (assoc (bim/wall {:id 20 :start [1 0 0] :end [2 0 0]}) :connected-to [10])]
+    (is (nil? (bim/clash wall hosted)))
+    (is (some? (bim/clash wall hosted {:include-related? true})))))
