@@ -85,6 +85,41 @@
 (defn opening [{:keys [id placement profile depth filled-by]}]
   {:id id :placement placement :profile profile :depth depth :filled-by filled-by})
 
+(defn rectangular-opening
+  [{:keys [id offset sill width height depth filled-by]
+    :or {sill 0.0 depth 0.3}}]
+  (when (or (neg? offset) (neg? sill) (not (pos? width)) (not (pos? height)))
+    (throw (ex-info "opening dimensions and placement are invalid"
+                    {:offset offset :sill sill :width width :height height})))
+  (opening {:id id :placement {:offset offset :sill sill}
+            :profile {:kind :rectangle :width width :height height}
+            :depth depth :filled-by filled-by}))
+
+(declare no-geometry classification-ref quantities property-set enum-value measured-value)
+(defn door
+  [{:keys [id name host-id opening-id width height operation]
+    :or {name "Door" width 0.9 height 2.1 operation :single-swing-left}}]
+  (element {:id id :kind :door :name name :global-id (str id) :placement :hosted
+            :geometry (no-geometry) :classification (classification-ref "Uniclass" "Pr_30_59_24" "Doors")
+            :quantities (quantities {})
+            :psets {"Pset_DoorCommon" (property-set "Pset_DoorCommon"
+                                                      {:OperationType (enum-value operation #{:single-swing-left :single-swing-right :double-swing})
+                                                       :OverallWidth (measured-value width :metre)
+                                                       :OverallHeight (measured-value height :metre)})}
+            :openings [] :connected-to [host-id opening-id]}))
+
+(defn window
+  [{:keys [id name host-id opening-id width height operation]
+    :or {name "Window" width 1.2 height 1.2 operation :fixed}}]
+  (element {:id id :kind :window :name name :global-id (str id) :placement :hosted
+            :geometry (no-geometry) :classification (classification-ref "Uniclass" "Pr_30_59_98" "Windows")
+            :quantities (quantities {})
+            :psets {"Pset_WindowCommon" (property-set "Pset_WindowCommon"
+                                                        {:OperationType (enum-value operation #{:fixed :casement :sliding})
+                                                         :OverallWidth (measured-value width :metre)
+                                                         :OverallHeight (measured-value height :metre)})}
+            :openings [] :connected-to [host-id opening-id]}))
+
 ;; ── material ──
 
 (def material-categories
@@ -191,6 +226,25 @@
             :psets {"Pset_WallCommon" (property-set "Pset_WallCommon" {:IsExternal (bool-value true)})}
             :openings [] :connected-to []}))
 
+(defn add-opening-to-wall [wall opening]
+  (let [length (get-in wall [:quantities :length-m])
+        wall-height (get-in wall [:geometry :profile :height])
+        {:keys [offset sill]} (:placement opening)
+        {:keys [width height]} (:profile opening)
+        overlaps? (fn [other]
+                    (let [{o :offset s :sill} (:placement other)
+                          {w :width h :height} (:profile other)]
+                      (and (< offset (+ o w)) (< o (+ offset width))
+                           (< sill (+ s h)) (< s (+ sill height)))))]
+    (when (or (> (+ offset width) length) (> (+ sill height) wall-height))
+      (throw (ex-info "opening exceeds wall bounds" {:wall-length length :wall-height wall-height :opening opening})))
+    (when (some overlaps? (:openings wall))
+      (throw (ex-info "opening overlaps an existing opening" {:opening-id (:id opening)})))
+    (update wall :openings conj opening)))
+
+(defn remove-opening-from-wall [wall opening-id]
+  (update wall :openings #(vec (remove (fn [opening] (= opening-id (:id opening))) %))))
+
 (defn wall-mesh
   "Convert a horizontal axis-sweep rectangle wall into an indexed box mesh."
   [{:keys [geometry]}]
@@ -205,6 +259,36 @@
         indices [0 2 1 1 2 3, 4 5 6 5 7 6, 0 4 2 2 4 6,
                  1 3 5 3 7 5, 0 1 4 1 5 4, 2 6 3 3 6 7]]
     {:positions positions :indices indices :normals (vec (repeat 8 [0 0 1]))}))
+
+(declare merge-meshes)
+(defn wall-with-openings-mesh
+  "Generate wall geometry with non-overlapping rectangular hosted openings."
+  [wall-element]
+  (if (empty? (:openings wall-element))
+    (wall-mesh wall-element)
+    (let [[[x0 y0 z0] [x1 y1 _]] (get-in wall-element [:geometry :axis])
+          length (get-in wall-element [:quantities :length-m])
+          thickness (get-in wall-element [:geometry :profile :thickness])
+          wall-height (get-in wall-element [:geometry :profile :height])
+          point-at (fn [offset z] [(+ x0 (* (/ offset length) (- x1 x0)))
+                                   (+ y0 (* (/ offset length) (- y1 y0))) (+ z0 z)])
+          box (fn [from to bottom height]
+                (wall-mesh (wall {:id :opening-segment :start (point-at from bottom)
+                                  :end (point-at to bottom) :thickness thickness :height height})))
+          openings (sort-by #(get-in % [:placement :offset]) (:openings wall-element))
+          vertical (mapcat (fn [o]
+                             (let [{:keys [offset sill]} (:placement o)
+                                   {:keys [width height]} (:profile o)]
+                               (cond-> []
+                                 (pos? sill) (conj (box offset (+ offset width) 0 sill))
+                                 (< (+ sill height) wall-height)
+                                 (conj (box offset (+ offset width) (+ sill height)
+                                            (- wall-height sill height)))))) openings)
+          gaps (map vector
+                    (cons 0 (map #(+ (get-in % [:placement :offset]) (get-in % [:profile :width])) openings))
+                    (concat (map #(get-in % [:placement :offset]) openings) [length]))
+          full-height (map (fn [[a b]] (box a b 0 wall-height)) (filter (fn [[a b]] (< a b)) gaps))]
+      (merge-meshes (concat full-height vertical)))))
 
 (defn merge-meshes [meshes]
   (loop [remaining meshes positions [] normals [] indices []]
