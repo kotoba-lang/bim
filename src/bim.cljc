@@ -49,9 +49,22 @@
   {:id id :name name :elevation elevation :height height :placement placement
    :spaces (vec spaces) :elements (vec elements)})
 
+(declare quantities)
 (defn space [{:keys [id name long-name label category boundary height quantities psets]}]
   {:id id :name name :long-name long-name :label label :category category
    :boundary boundary :height height :quantities quantities :psets (or psets {})})
+(defn space-boundary-area [boundary]
+  (when (< (count boundary) 3) (throw (ex-info "space boundary needs at least three points" {})))
+  (let [pairs (map vector boundary (concat (rest boundary) [(first boundary)]))]
+    (/ (#?(:clj Math/abs :cljs js/Math.abs)
+        (reduce + (map (fn [[[x1 y1] [x2 y2]]] (- (* x1 y2) (* x2 y1))) pairs))) 2.0)))
+(defn room-space [{:keys [id name label category boundary height]
+                   :or {label "" category :other height 3.0}}]
+  (when-not (space-categories category) (throw (ex-info "invalid space category" {:category category})))
+  (let [area (space-boundary-area boundary)]
+    (space {:id id :name name :long-name name :label label :category category :boundary (vec boundary) :height height
+            :quantities (quantities {:gross-area-m2 area :net-area-m2 area
+                                     :gross-volume-m3 (* area height) :net-volume-m3 (* area height)}) :psets {}})))
 
 ;; ── elements ──
 
@@ -222,6 +235,15 @@
   (when-not (find-storey proj storey-id)
     (throw (ex-info "storey not found" {:storey-id storey-id})))
   (update-storey* proj storey-id #(update % :elements conj elem)))
+(defn add-space [proj storey-id new-space]
+  (when-not (find-storey proj storey-id) (throw (ex-info "storey not found" {:storey-id storey-id})))
+  (when (some #(= (:id new-space) (:id %)) (mapcat :spaces (mapcat :storeys (mapcat :buildings (:sites proj)))))
+    (throw (ex-info "space id already exists" {:id (:id new-space)})))
+  (update-storey* proj storey-id #(update % :spaces conj new-space)))
+(defn update-space [proj storey-id space-id f & args]
+  (update-storey* proj storey-id #(update % :spaces (fn [spaces] (mapv (fn [s] (if (= space-id (:id s)) (apply f s args) s)) spaces)))))
+(defn delete-space [proj storey-id space-id]
+  (update-storey* proj storey-id #(update % :spaces (fn [spaces] (vec (remove (fn [s] (= space-id (:id s))) spaces))))))
 
 (defn update-element [proj storey-id element-id f & args]
   (update-storey* proj storey-id

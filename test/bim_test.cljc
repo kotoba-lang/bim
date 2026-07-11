@@ -107,3 +107,16 @@
     (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error) (bim/add-storey added 2 level-1)))
     (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
                  (bim/delete-storey (bim/add-element added 4 (bim/slab {:id 40 :boundary [[0 0 3.2] [1 0 3.2] [1 1 3.2] [0 1 3.2]]})) 2 4)))))
+
+(deftest semantic-room-space-lifecycle
+  (let [ground (bim/storey {:id 3 :name "Ground" :elevation 0 :height 3 :placement :identity :spaces [] :elements []})
+        project (-> (bim/project "House")
+                    (update :sites conj (bim/site {:id 1 :name "Site" :placement :identity :buildings
+                                                   [(bim/building {:id 2 :name "House" :placement :identity :reference-elevation 0 :storeys [ground]})]})))
+        room (bim/room-space {:id 50 :name "Living" :category :residential :boundary [[0 0 0] [4 0 0] [4 3 0] [0 3 0]] :height 3})
+        added (bim/add-space project 3 room) renamed (bim/update-space added 3 50 assoc :name "Living Room")]
+    (is (== 12 (get-in room [:quantities :net-area-m2])))
+    (is (== 36 (get-in room [:quantities :net-volume-m3])))
+    (is (= "Living Room" (:name (first (:spaces (bim/find-storey renamed 3))))))
+    (is (empty? (:spaces (bim/find-storey (bim/delete-space renamed 3 50) 3))))
+    (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error) (bim/add-space added 3 room)))))
