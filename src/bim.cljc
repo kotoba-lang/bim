@@ -184,6 +184,27 @@
                 (:buildings s)))
         (:sites proj)))
 
+(defn find-building [proj id]
+  (some (fn [s] (some #(when (= id (:id %)) %) (:buildings s))) (:sites proj)))
+
+(defn- update-building* [proj building-id f]
+  (update proj :sites
+          #(mapv (fn [site]
+                   (update site :buildings
+                           (fn [buildings] (mapv (fn [b] (if (= building-id (:id b)) (f b) b)) buildings)))) %)))
+
+(defn add-storey [proj building-id new-storey]
+  (when-not (find-building proj building-id) (throw (ex-info "building not found" {:building-id building-id})))
+  (when (find-storey proj (:id new-storey)) (throw (ex-info "storey id already exists" {:storey-id (:id new-storey)})))
+  (update-building* proj building-id #(update % :storeys conj new-storey)))
+
+(defn delete-storey [proj building-id storey-id]
+  (let [target (find-storey proj storey-id)]
+    (when-not target (throw (ex-info "storey not found" {:storey-id storey-id})))
+    (when (or (seq (:elements target)) (seq (:spaces target)))
+      (throw (ex-info "cannot delete non-empty storey" {:storey-id storey-id})))
+    (update-building* proj building-id #(update % :storeys (fn [storeys] (vec (remove (fn [s] (= storey-id (:id s))) storeys)))))))
+
 (defn- update-storey* [proj storey-id f]
   (update proj :sites
           (fn [sites]
@@ -225,6 +246,40 @@
                                                         (let [d (- (second end) (second start))] (* d d))))})
             :psets {"Pset_WallCommon" (property-set "Pset_WallCommon" {:IsExternal (bool-value true)})}
             :openings [] :connected-to []}))
+
+(defn- polygon-area [points]
+  (#?(:clj Math/abs :cljs js/Math.abs)
+   (/ (reduce + (map (fn [[[x1 y1 _] [x2 y2 _]]] (- (* x1 y2) (* x2 y1)))
+                     (partition 2 1 (conj (vec points) (first points))))) 2)))
+
+(defn slab
+  [{:keys [id name boundary thickness material]
+    :or {name "Slab" thickness 0.25 material "Concrete"}}]
+  (when (< (count boundary) 3) (throw (ex-info "slab boundary needs at least three points" {})))
+  (when-not (pos? thickness) (throw (ex-info "slab thickness must be positive" {:thickness thickness})))
+  (let [area (polygon-area boundary)]
+    (element {:id id :kind :slab :name name :global-id (str id) :placement :identity
+              :geometry {:kind :slab-extrusion :boundary (vec boundary) :thickness thickness}
+              :material-layers [(material-layer material thickness false :concrete)]
+              :classification (classification-ref "Uniclass" "Ss_20_30" "Floor systems")
+              :quantities (quantities {:gross-area-m2 area :net-area-m2 area
+                                       :gross-volume-m3 (* area thickness) :net-volume-m3 (* area thickness)})
+              :psets {"Pset_SlabCommon" (property-set "Pset_SlabCommon" {:IsExternal (bool-value false)})}
+              :openings [] :connected-to []})))
+
+(defn slab-mesh [{:keys [geometry]}]
+  (let [boundary (:boundary geometry) thickness (:thickness geometry) n (count boundary)
+        top (mapv (fn [[x y z]] [x y (+ z thickness)]) boundary)
+        positions (into (vec boundary) top)
+        bottom-tris (mapcat (fn [i] [0 (inc i) i]) (range 1 (dec n)))
+        top-tris (mapcat (fn [i] [n (+ n i) (+ n (inc i))]) (range 1 (dec n)))
+        sides (mapcat (fn [i] (let [j (mod (inc i) n)] [i j (+ n i), j (+ n j) (+ n i)])) (range n))
+        indices (vec (concat bottom-tris top-tris sides))]
+    {:positions positions :indices indices :normals (vec (repeat (* 2 n) [0 0 1]))}))
+
+(declare wall-with-openings-mesh)
+(defn element-mesh [element]
+  (case (:kind element) :wall (wall-with-openings-mesh element) :slab (slab-mesh element) nil))
 
 (defn add-opening-to-wall [wall opening]
   (let [length (get-in wall [:quantities :length-m])
