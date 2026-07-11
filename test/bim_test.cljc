@@ -83,3 +83,27 @@
                  (-> wall
                      (bim/add-opening-to-wall opening)
                      (bim/add-opening-to-wall (bim/rectangular-opening {:id 22 :offset 1.5 :sill 1.5 :width 1 :height 1})))))))
+
+(deftest floor-slab-quantities-and-mesh
+  (let [slab (bim/slab {:id 40 :name "Ground Slab" :boundary [[0 0 0] [8 0 0] [8 6 0] [0 6 0]]
+                        :thickness 0.25})
+        mesh (bim/slab-mesh slab)]
+    (is (== 48.0 (get-in slab [:quantities :gross-area-m2])))
+    (is (== 12.0 (get-in slab [:quantities :gross-volume-m3])))
+    (is (= 8 (count (:positions mesh))))
+    (is (= 36 (count (:indices mesh))))
+    (is (= mesh (bim/element-mesh slab)))))
+
+(deftest storey-lifecycle-integrity
+  (let [ground (bim/storey {:id 3 :name "Ground" :elevation 0 :height 3.2 :placement :identity :spaces [] :elements []})
+        project (-> (bim/project "Tower")
+                    (update :sites conj (bim/site {:id 1 :name "Site" :placement :identity :buildings
+                                                   [(bim/building {:id 2 :name "Tower" :placement :identity
+                                                                   :reference-elevation 0 :storeys [ground]})]})))
+        level-1 (bim/storey {:id 4 :name "Level 01" :elevation 3.2 :height 3.2 :placement :identity :spaces [] :elements []})
+        added (bim/add-storey project 2 level-1)]
+    (is (= 2 (count (:storeys (bim/find-building added 2)))))
+    (is (= 1 (count (:storeys (bim/find-building (bim/delete-storey added 2 4) 2)))))
+    (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error) (bim/add-storey added 2 level-1)))
+    (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+                 (bim/delete-storey (bim/add-element added 4 (bim/slab {:id 40 :boundary [[0 0 3.2] [1 0 3.2] [1 1 3.2] [0 1 3.2]]})) 2 4)))))
