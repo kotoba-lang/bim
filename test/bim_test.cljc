@@ -55,3 +55,31 @@
     (is (= 8 (count (:positions mesh))))
     (is (= 36 (count (:indices mesh))))
     (is (empty? (:elements (bim/find-storey (bim/delete-element with-wall 3 10) 3))))))
+
+(deftest hosted-door-and-window-openings
+  (let [door-opening (bim/rectangular-opening {:id 20 :offset 1 :width 0.9 :height 2.1 :filled-by 30})
+        window-opening (bim/rectangular-opening {:id 21 :offset 4 :sill 0.9 :width 1.2 :height 1.2 :filled-by 31})
+        hosted-wall (-> (bim/wall {:id 10 :start [0 0 0] :end [8 0 0] :thickness 0.25 :height 3})
+                        (bim/add-opening-to-wall door-opening)
+                        (bim/add-opening-to-wall window-opening))
+        d (bim/door {:id 30 :host-id 10 :opening-id 20})
+        w (bim/window {:id 31 :host-id 10 :opening-id 21})
+        mesh (bim/wall-with-openings-mesh hosted-wall)]
+    (is (= 2 (count (:openings hosted-wall))))
+    (is (= [10 20] (:connected-to d)))
+    (is (= [10 21] (:connected-to w)))
+    (is (= :single-swing-left (get-in d [:psets "Pset_DoorCommon" :props :OperationType :value])))
+    (is (= :fixed (get-in w [:psets "Pset_WindowCommon" :props :OperationType :value])))
+    (is (= 48 (count (:positions mesh))))
+    (is (= 216 (count (:indices mesh))))
+    (is (= 1 (count (:openings (bim/remove-opening-from-wall hosted-wall 20)))))))
+
+(deftest opening-integrity-guards
+  (let [wall (bim/wall {:id 10 :start [0 0 0] :end [5 0 0] :height 3})
+        opening (bim/rectangular-opening {:id 20 :offset 1 :sill 1 :width 1 :height 1})]
+    (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+                 (bim/add-opening-to-wall wall (bim/rectangular-opening {:id 21 :offset 4.5 :width 1 :height 2}))))
+    (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+                 (-> wall
+                     (bim/add-opening-to-wall opening)
+                     (bim/add-opening-to-wall (bim/rectangular-opening {:id 22 :offset 1.5 :sill 1.5 :width 1 :height 1})))))))
