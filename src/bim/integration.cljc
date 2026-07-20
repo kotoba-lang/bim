@@ -1818,9 +1818,10 @@
    :structural.combination/kind (or kind :ultimate)
    :structural.combination/factors factors})
 
-(defn structural-model [{:keys [nodes members load-cases combinations]}]
+(defn structural-model [{:keys [nodes members shells load-cases combinations]}]
   {:structural/schema-version schema-version :structural/nodes (vec nodes)
-   :structural/members (vec members) :structural/load-cases (vec load-cases)
+   :structural/members (vec members) :structural/shells (vec shells)
+   :structural/load-cases (vec load-cases)
    :structural/combinations (vec combinations)})
 
 (defn validate-structural-model [model]
@@ -2215,6 +2216,108 @@
                  :structural/role role :structural/analytical-axis analytical-axis
                  :structural/section section :structural/material material
                  :structural/loads (vec loads)))
+
+(defn- project-elements [project]
+  (mapcat :elements (mapcat :storeys (mapcat :buildings (:sites project)))))
+
+(defn- analytical-axis [element]
+  (or (:structural/analytical-axis element) (get-in element [:geometry :axis])))
+
+(defn- point-key [point tolerance]
+  (mapv #(long (round (/ % tolerance))) point))
+
+(defn- structural-shell-from-element [element]
+  (let [role (:structural/role element)]
+    (case (:kind element)
+      :wall
+      (when (contains? #{:bearing :shear-wall :structural} role)
+        (let [[[x1 y1 z1] [x2 y2 z2]] (analytical-axis element)
+              height (get-in element [:geometry :profile :height])]
+          {:structural.shell/id (:id element) :structural.shell/source-element-id (:id element)
+           :structural.shell/role role
+           :structural.shell/nodes [[x1 y1 z1] [x2 y2 z2]
+                                    [x2 y2 (+ z2 height)] [x1 y1 (+ z1 height)]]
+           :structural.shell/thickness-m (get-in element [:geometry :profile :thickness])
+           :structural.shell/material (:structural/material element)}))
+      :slab
+      (when (contains? #{:floor :diaphragm :structural} role)
+        {:structural.shell/id (:id element) :structural.shell/source-element-id (:id element)
+         :structural.shell/role role
+         :structural.shell/nodes (mapv vec (get-in element [:geometry :boundary]))
+         :structural.shell/thickness-m (or (get-in element [:geometry :thickness])
+                                           (:thickness element))
+         :structural.shell/material (:structural/material element)})
+      nil)))
+
+(defn generate-structural-model
+  "Derive a coordinated analytical model from authored BIM members and
+  load-bearing walls/slabs. Coincident endpoints become shared nodes."
+  ([project] (generate-structural-model project {}))
+  ([project {:keys [tolerance-m default-section default-material support-elevation
+                    load-cases combinations]
+             :or {tolerance-m 1.0e-6
+                  default-section {:kind :rectangle :width-m 0.2 :depth-m 0.3}
+                  default-material {:name "Structural Steel" :elastic-modulus-pa 2.0e11
+                                    :yield-strength-pa 2.5e8 :density-kg-m3 7850.0}}}]
+   (when-not (and (number? tolerance-m) (pos? tolerance-m))
+     (throw (ex-info "structural node tolerance must be positive"
+                     {:tolerance-m tolerance-m})))
+   (let [elements (vec (project-elements project))
+         line-elements
+         (filterv #(let [axis (analytical-axis %)]
+                     (and (= 2 (count axis))
+                          (every? (fn [point]
+                                    (and (= 3 (count point)) (every? number? point))) axis)
+                          (or (contains? #{:beam :column :brace :member} (:kind %))
+                              (and (:structural/role %)
+                                   (not (contains? #{:wall :slab} (:kind %)))))))
+                  elements)
+         point-by-key (reduce (fn [result element]
+                                (reduce #(assoc %1 (point-key %2 tolerance-m) (vec %2))
+                                        result (analytical-axis element)))
+                              {} line-elements)
+         ordered-keys (sort (keys point-by-key))
+         node-id-by-key (into {} (map-indexed (fn [index key] [key (str "N" (inc index))])
+                                               ordered-keys))
+         minimum-z (when (seq point-by-key) (reduce min (map #(nth % 2) (vals point-by-key))))
+         support-z (or support-elevation minimum-z)
+         nodes (mapv (fn [key]
+                       (let [point (point-by-key key)]
+                         (structural-node
+                          {:id (node-id-by-key key) :point point
+                           :restraints (if (and (number? support-z)
+                                                (<= (math-abs (- (nth point 2) support-z)) tolerance-m))
+                                         [true true true] [false false false])})))
+                     ordered-keys)
+         members
+         (mapv (fn [element]
+                 (let [[start end] (analytical-axis element)
+                       section (structural-section-properties
+                                (or (:structural/section element) default-section))
+                       material (merge default-material (:structural/material element))]
+                   (assoc
+                    (structural-analysis-member
+                     {:id (:id element)
+                      :start-node (node-id-by-key (point-key start tolerance-m))
+                      :end-node (node-id-by-key (point-key end tolerance-m))
+                      :area-m2 (:area-m2 section) :section section
+                      :material (:name material)
+                      :elastic-modulus-pa (:elastic-modulus-pa material)
+                      :yield-strength-pa (:yield-strength-pa material)
+                      :density-kg-m3 (:density-kg-m3 material)})
+                    :structural.member/source-element-id (:id element)
+                    :structural.member/role (:structural/role element))))
+               line-elements)
+         shells (vec (keep structural-shell-from-element elements))
+         load-cases (or load-cases
+                        [(structural-load-case {:id :dead :name "Self weight" :kind :dead
+                                                :gravity [0.0 0.0 -9.80665]})])
+         combinations (or combinations
+                          [(structural-load-combination
+                            {:id :uls :name "ULS" :kind :ultimate :factors {:dead 1.35}})])]
+     (assoc (structural-model {:nodes nodes :members members :shells shells
+                               :load-cases load-cases :combinations combinations})
+            :structural/source-element-count (+ (count line-elements) (count shells))))))
 
 (defn mep-system [{:keys [id name kind medium design-flow segments]}]
   {:mep/id id :mep/name name :mep/kind kind :mep/medium medium
