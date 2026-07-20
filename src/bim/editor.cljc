@@ -245,3 +245,26 @@
                         #(str (or (:element/id %) (:element/ids %)))))
          (partition-by (juxt :snap/kind :snap/point))
          (mapv first))))
+
+(defn snap-translation
+  "Correct a proposed element translation by snapping any source candidate to
+  the nearest model or grid target. Returns the corrected delta and evidence."
+  [source-candidates target-candidates delta options]
+  (let [attempts
+        (keep (fn [source]
+                (let [proposed (mapv + (:snap/point source) delta)]
+                  (when-let [target (snap-point proposed target-candidates options)]
+                    (let [correction (mapv - (:snap/point target) proposed)]
+                      {:snap/kind (:snap/kind target)
+                       :snap/source-point (:snap/point source)
+                       :snap/target-point (:snap/point target)
+                       :snap/distance (:snap/distance target)
+                       :snap/delta (mapv + delta correction)
+                       :snap/target-element (:element/id target)
+                       :snap/target-elements (:element/ids target)}))))
+              source-candidates)]
+    (first (sort-by (juxt :snap/distance
+                          #(case (:snap/kind %) :endpoint 0 :intersection 1
+                                 :midpoint 2 :grid 3 4)
+                          :snap/source-point)
+                    attempts))))

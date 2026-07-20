@@ -72,3 +72,18 @@
                    :direction [0.0 0.0 1.0] :depth 3.0})]
     (is (= 12 (count segments)))
     (is (some #{[[4.0 5.5 1.0] [4.0 5.5 4.0]]} segments))))
+
+(deftest translation-snap-selects-the-smallest-model-correction
+  (let [source (editor/model-snap-candidates
+                [{:id 1 :geometry {:kind :axis-sweep
+                                   :axis [[0.0 0.0 0.0] [2.0 0.0 0.0]]}}])
+        targets (editor/model-snap-candidates
+                 [{:id 2 :geometry {:kind :axis-sweep
+                                    :axis [[5.0 0.0 0.0] [8.0 0.0 0.0]]}}])
+        snapped (editor/snap-translation source targets [2.94 0.02 0.0]
+                                         {:grid 0.5 :tolerance 0.1})]
+    (is (= :endpoint (:snap/kind snapped)))
+    (is (= [3.0 0.0 0.0] (:snap/delta snapped)))
+    (is (= [2.0 0.0 0.0] (:snap/source-point snapped)))
+    (is (= [5.0 0.0 0.0] (:snap/target-point snapped)))
+    (is (= 2 (:snap/target-element snapped)))))
