@@ -665,7 +665,9 @@
               (if (= current end-grid)
                 (loop [node current path []]
                   (if node (recur (came node) (conj path node)) (vec (reverse path))))
-                (let [next-nodes (filter #(and (inside? %) (not (blocked? %))
+                (let [next-nodes (filter #(and (inside? %)
+                                               (or (= % start-grid) (= % end-grid)
+                                                   (not (blocked? %)))
                                                (not (contains? came %)))
                                          (map #(mapv + current %) directions))]
                   (recur (into queue next-nodes) (inc cursor)
