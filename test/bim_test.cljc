@@ -1564,6 +1564,41 @@
     (is (< (count (re-seq #"data-element-id=" hidden))
            (count (re-seq #"data-element-id=" wire))))))
 
+(deftest persistent-drawing-annotations-support-editing-and-rendering
+  (let [wall (bim/wall {:id 250 :start [0 0 0] :end [6 0 0] :height 3.0})
+        storey (bim/storey {:id 35 :name "Annotations" :elevation 0 :height 3
+                            :placement :identity :spaces [] :elements [wall]})
+        dimension (integration/drawing-annotation
+                   {:id :overall :kind :dimension :from [0 0] :to [6 0]
+                    :references [{:element-id 250 :anchor :start}
+                                 {:element-id 250 :anchor :end}]})
+        leader (integration/drawing-annotation
+                {:id :note-1 :kind :leader :points [[2 0] [2 1] [3 1]]
+                 :text "Fire-rated wall"})
+        cloud (integration/drawing-annotation
+               {:id :revision-c01 :kind :revision-cloud :revision "C01"
+                :points [[1 -0.5] [5 -0.5] [5 0.5] [1 0.5]]})
+        view (-> (integration/drawing-view
+                  {:id :annotated :kind :floor-plan :name "Annotated plan"})
+                 (integration/add-view-annotation dimension)
+                 (integration/add-view-annotation leader)
+                 (integration/add-view-annotation cloud)
+                 (integration/update-view-annotation :note-1 {:text "2h fire wall"}))
+        svg (drawing/documented-floor-plan-svg
+             storey {:annotations (:view/annotations view)})
+        without-cloud (integration/remove-view-annotation view :revision-c01)]
+    (is (= 6.0 (:value dimension)))
+    (is (= [{:element-id 250 :anchor :start} {:element-id 250 :anchor :end}]
+           (:references dimension)))
+    (is (= "2h fire wall" (get-in view [:view/annotations 1 :text])))
+    (is (re-find #"class=\"leader-annotation\"" svg))
+    (is (re-find #"2h fire wall" svg))
+    (is (re-find #"class=\"revision-cloud\"" svg))
+    (is (re-find #"data-revision=\"C01\"" svg))
+    (is (= 2 (count (:view/annotations without-cloud))))
+    (is (thrown? #?(:clj Exception :cljs js/Error)
+                 (integration/add-view-annotation view leader)))))
+
 (deftest detail-callouts-link-cropped-model-views
   (let [wall (bim/wall {:id 301 :start [0 0 0] :end [6 0 0] :height 3.0})
         storey (bim/storey {:id 40 :name "Callout Plan" :elevation 0 :height 3

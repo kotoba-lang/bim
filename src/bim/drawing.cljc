@@ -79,6 +79,25 @@
           (shapes/text (+ x width 25) (- y 21) label
                        {:text-anchor "middle" :font-family "sans-serif"
                         :font-size 9 :fill "#4c1d95"})])
+       :leader
+       (let [points (mapv (fn [[x y]] [(sx x) (sy y)]) (:points annotation))
+             [text-x text-y] (last points)]
+         [:g {:class "leader-annotation" :data-annotation-id (:annotation/id annotation)}
+          [:polyline (merge {:points (string/join " " (map #(string/join "," %) points))
+                             :fill "none" :stroke "#0f172a" :stroke-width 1
+                             :marker-start "url(#arrow)"}
+                            style (:style annotation))]
+          (shapes/text (+ text-x 4) (- text-y 4) (:text annotation)
+                       (merge {:font-family "sans-serif" :font-size 10}
+                              style (:style annotation)))])
+       :revision-cloud
+       (let [points (mapv (fn [[x y]] [(sx x) (sy y)]) (:points annotation))]
+         [:g {:class "revision-cloud" :data-annotation-id (:annotation/id annotation)
+              :data-revision (:revision annotation)}
+          [:polygon (merge {:points (string/join " " (map #(string/join "," %) points))
+                            :fill "none" :stroke "#dc2626" :stroke-width 2
+                            :stroke-linejoin "round" :stroke-dasharray "2 3"}
+                           style (:style annotation))]])
        [:g {:class "unsupported-annotation" :data-kind (name (:kind annotation))}]))
    annotations))
 
