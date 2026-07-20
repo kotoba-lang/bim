@@ -63,6 +63,22 @@
                                        "element-tag" "text-annotation")
                               :font-family "sans-serif" :font-size 10}
                              style (:style annotation))))
+       :callout
+       (let [[[min-x min-y] [max-x max-y]] (:bounds annotation)
+             x (sx min-x) y (sy max-y)
+             width (- (sx max-x) x) height (- (sy min-y) y)
+             label (or (:label annotation) (:target-view-id annotation) "Detail")]
+         [:g {:class "detail-callout" :data-target-view (:target-view-id annotation)}
+          (shapes/rect x y width height
+                       (merge {:fill "none" :stroke "#7c3aed" :stroke-width 1.5
+                               :stroke-dasharray "6 3"} style (:style annotation)))
+          (shapes/line (+ x width) y (+ x width 18) (- y 18)
+                       (merge {:stroke "#7c3aed" :stroke-width 1.5} style))
+          [:circle {:cx (+ x width 25) :cy (- y 25) :r 12
+                    :fill "white" :stroke "#7c3aed" :stroke-width 1.5}]
+          (shapes/text (+ x width 25) (- y 21) label
+                       {:text-anchor "middle" :font-family "sans-serif"
+                        :font-size 9 :fill "#4c1d95"})])
        [:g {:class "unsupported-annotation" :data-kind (name (:kind annotation))}]))
    annotations))
 
@@ -178,7 +194,7 @@
   "Generate a section or elevation from mesh bounds. Sections distinguish cut
   objects from projected objects; elevations emit front-view silhouettes."
   [building {:keys [kind axis cut-position depth scale margin title hidden-line?
-                    show-tags? annotations annotation-style]
+                    show-tags? annotations annotation-style crop view-id parent-view-id]
              :or {kind :section axis :x cut-position 0.0 depth 1000.0 scale 50
                   margin 50 hidden-line? true show-tags? true}
              :as options}]
@@ -194,6 +210,15 @@
                               (and (<= near (+ cut-position depth)) (>= far cut-position))
                               (<= (#?(:clj Math/abs :cljs js/Math.abs) (- near cut-position)) depth))))
                         entries)
+        visible (if crop
+                  (let [[[crop-min-x crop-min-z] [crop-max-x crop-max-z]] crop]
+                    (filter (fn [{:keys [bounds]}]
+                              (let [[x0 x1] (:horizontal bounds)
+                                    [z0 z1] (:vertical bounds)]
+                                (and (<= x0 crop-max-x) (>= x1 crop-min-x)
+                                     (<= z0 crop-max-z) (>= z1 crop-min-z))))
+                            visible))
+                  visible)
         visible (sort-by #(first (get-in % [:bounds :depth])) visible)
         contained? (fn [outer inner]
                      (and (<= (first (:horizontal outer)) (first (:horizontal inner)))
@@ -208,13 +233,16 @@
         points (mapcat (fn [{:keys [bounds]}]
                          (let [[x0 x1] (:horizontal bounds) [z0 z1] (:vertical bounds)]
                            [[x0 z0] [x1 z1]])) visible)
-        {:keys [min] maximum :max} (bounds-2d points)
+        {:keys [min] maximum :max} (if crop {:min (first crop) :max (second crop)}
+                                           (bounds-2d points))
         [min-x min-z] min [max-x max-z] maximum
         width (+ (* scale (- max-x min-x)) (* 2 margin))
         height (+ (* scale (- max-z min-z)) (* 2 margin))
         sx #(+ margin (* scale (- % min-x))) sz #(- height margin (* scale (- % min-z)))]
-    (apply svg/svg {:viewBox (str "0 0 " width " " height)
-                    :data-view-kind (name kind)}
+    (apply svg/svg (cond-> {:viewBox (str "0 0 " width " " height)
+                            :data-view-kind (name kind)}
+                     view-id (assoc :data-view-id view-id)
+                     parent-view-id (assoc :data-parent-view-id parent-view-id))
            (concat
             [(shapes/rect 0 0 "100%" "100%" {:fill "white"})
              (shapes/text margin 24 (or title (str (string/capitalize (name kind)) " " (name axis)))
@@ -243,6 +271,24 @@
 
 (defn orthographic-view-svg [building options]
   (svg/render (orthographic-view building options)))
+
+(defn detail-view
+  "Generate an enlarged, model-linked detail from a cropped section/elevation.
+  The root records both its own id and its parent view for callout navigation."
+  [building {:keys [id parent-view-id crop] :as options}]
+  (when-not (and id parent-view-id (= 2 (count crop))
+                 (every? #(and (= 2 (count %)) (every? number? %)) crop))
+    (throw (ex-info "detail view requires id, parent view, and 2D crop bounds"
+                    {:id id :parent-view-id parent-view-id :crop crop})))
+  (let [view (orthographic-view
+              building (-> options
+                           (assoc :kind (or (:source-kind options) :section)
+                                  :view-id id :parent-view-id parent-view-id)
+                           (dissoc :id :source-kind)))]
+    (update view 1 assoc :data-view-kind "detail")))
+
+(defn detail-view-svg [building options]
+  (svg/render (detail-view building options)))
 
 (def sheet-sizes-mm {:a0 [1189 841] :a1 [841 594] :a2 [594 420] :a3 [420 297]})
 
