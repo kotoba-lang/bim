@@ -72,3 +72,47 @@
     (is (empty? (:panel/issues result)))
     (is (< (get-in result [:panel/voltage-drops :c1
                            :electrical/voltage-drop-percent]) 3.0))))
+
+(deftest feeder-fault-duty-protection-and-coordination
+  (let [analysis
+        (mep/analyze-electrical-feeder
+         {:id :main-feeder :phases 3 :apparent-power-va 40000.0 :voltage-v 400.0
+          :power-factor 0.9 :length-m 50.0 :resistance-ohm-m 0.0005
+          :reactance-ohm-m 0.00008 :source-resistance-ohm 0.01
+          :source-reactance-ohm 0.02 :cable-ampacity-a 100.0
+          :max-voltage-drop-percent 3.0})
+        catalog [{:id :mccb-50 :rating-a 50.0 :breaking-capacity-a 10000.0
+                  :instantaneous-trip-multiple 10.0}
+                 {:id :mccb-63 :rating-a 63.0 :breaking-capacity-a 6000.0
+                  :instantaneous-trip-multiple 10.0}
+                 {:id :mccb-80 :rating-a 80.0 :breaking-capacity-a 10000.0
+                  :instantaneous-trip-multiple 10.0}]
+        protection (mep/select-protective-device analysis catalog)
+        downstream (:electrical.protection/device protection)
+        coordinated (mep/check-protection-coordination
+                     downstream
+                     {:id :upstream :rating-a 125.0
+                      :instantaneous-trip-multiple 100.0}
+                     (:electrical.feeder/prospective-fault-current-a analysis))
+        uncoordinated (mep/check-protection-coordination
+                       downstream
+                       {:id :upstream-fast :rating-a 125.0
+                        :instantaneous-trip-multiple 5.0}
+                       (:electrical.feeder/prospective-fault-current-a analysis))]
+    (is (< (#?(:clj Math/abs :cljs js/Math.abs)
+            (- (/ 40000.0 (* 400.0 (#?(:clj Math/sqrt :cljs js/Math.sqrt) 3.0)))
+               (:electrical.feeder/design-current-a analysis)))
+           1.0e-9))
+    (is (< (:electrical.feeder/voltage-drop-percent analysis) 1.0))
+    (is (> (:electrical.feeder/prospective-fault-current-a analysis) 5000.0))
+    (is (empty? (:electrical.feeder/issues analysis)))
+    (is (= :mccb-63 (get-in protection [:electrical.protection/device :id])))
+    (is (pos? (:electrical.protection/breaking-margin-a protection)))
+    (is (true? (:electrical.coordination/coordinated? coordinated)))
+    (is (false? (:electrical.coordination/coordinated? uncoordinated)))
+    (is (thrown-with-msg?
+         #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+         #"no protective device"
+         (mep/select-protective-device analysis
+                                       [{:id :undersized :rating-a 50.0
+                                         :breaking-capacity-a 10000.0}])))))
