@@ -468,8 +468,42 @@
     (is (= 1728 (count (:indices torus))))
     (is (= [6.0 2.0 3.0] (first (:positions torus))))
     (is (= [-1.0 -0.0 -0.0] (first (:normals torus))))
-    (is (= 325 (count (:positions patch))))
-    (is (= 1728 (count (:indices patch))))))
+    (is (= 48 (count (:positions patch))))
+    (is (= 48 (count (:indices patch))))))
+
+(deftest trims-analytic-curved-faces-with-holes
+  (let [radius 2.0
+        sphere-point (fn [u v]
+                       [(* radius (#?(:clj Math/cos :cljs js/Math.cos) v)
+                           (#?(:clj Math/cos :cljs js/Math.cos) u))
+                        (* radius (#?(:clj Math/cos :cljs js/Math.cos) v)
+                           (#?(:clj Math/sin :cljs js/Math.sin) u))
+                        (* radius (#?(:clj Math/sin :cljs js/Math.sin) v))])
+        ring (fn [uvs] (mapv #(apply sphere-point %) uvs))
+        mesh (bim/element-mesh
+              {:geometry {:kind :advanced-brep
+                          :faces [{:same-sense true
+                                   :surface {:kind :sphere :radius radius
+                                             :position {:location [0 0 0]}}
+                                   :bounds [{:kind :outer :orientation true
+                                             :points (ring [[0.0 0.0] [1.5 0.0]
+                                                           [1.5 1.0] [0.0 1.0]])}
+                                            {:kind :inner :orientation true
+                                             :points (ring [[0.5 0.25] [0.5 0.75]
+                                                           [1.0 0.75] [1.0 0.25]])}]}]}})
+        uv (fn [[x y z]]
+             [(#?(:clj Math/atan2 :cljs js/Math.atan2) y x)
+              (#?(:clj Math/asin :cljs js/Math.asin) (/ z radius))])
+        parameter-area
+        (reduce + (map (fn [[a b c]]
+                         (let [[ax ay] (uv (nth (:positions mesh) a))
+                               [bx by] (uv (nth (:positions mesh) b))
+                               [cx cy] (uv (nth (:positions mesh) c))]
+                           (/ (#?(:clj Math/abs :cljs js/Math.abs)
+                               (- (* (- bx ax) (- cy ay)) (* (- by ay) (- cx ax)))) 2.0)))
+                       (partition 3 (:indices mesh))))]
+    (is (pos? (count (:positions mesh))))
+    (is (< (#?(:clj Math/abs :cljs js/Math.abs) (- parameter-area 1.25)) 1.0e-6))))
 
 (deftest meshes-rational-b-spline-advanced-face
   (let [mesh (bim/element-mesh
