@@ -1070,6 +1070,63 @@
           #(mapv (fn [annotation]
                    (reassociate-drawing-annotation annotation elements)) %)))
 
+(def annotation-kinds #{:tag :text :leader :level})
+
+(defn annotation-family-definition
+  "Create a 2D annotation family using the same parameter/type/catalog engine
+  as model families. Label bindings map family parameters to element paths."
+  [{:keys [target-categories label-bindings default-anchor] :as spec}]
+  (let [definition (family-definition (assoc spec :category :annotation))
+        kind (get-in definition [:family/template :kind])]
+    (when-not (contains? annotation-kinds kind)
+      (throw (ex-info "annotation family template requires a supported annotation kind"
+                      {:family-id (:family/id definition) :kind kind})))
+    (assoc definition
+           :family/domain :annotation
+           :annotation/target-categories (set target-categories)
+           :annotation/label-bindings (or label-bindings {})
+           :annotation/default-anchor (or default-anchor :midpoint))))
+
+(defn instantiate-annotation-family
+  "Materialize an annotation family type at 2D placement data."
+  [catalog family-id type-key annotation-id overrides placement]
+  (let [family (get-in catalog [:family-catalog/families family-id])]
+    (when-not (= :annotation (:family/domain family))
+      (throw (ex-info "family is not an annotation family" {:family-id family-id})))
+    (let [instance (instantiate-family-type catalog family-id type-key annotation-id overrides)
+          annotation (merge instance placement {:id annotation-id})]
+      (assoc (drawing-annotation annotation)
+             :annotation/family-id family-id :annotation/family-type type-key
+             :annotation/family-parameters (:family/parameters instance)))))
+
+(defn tag-elements-with-family
+  "Generate associative tags for every matching element. Element fields feed
+  family parameters through the definition's label bindings."
+  ([catalog family-id type-key elements]
+   (tag-elements-with-family catalog family-id type-key elements {}))
+  ([catalog family-id type-key elements {:keys [id-prefix offset overrides]
+                                         :or {id-prefix "tag" offset [0.0 0.0]}}]
+   (let [family (get-in catalog [:family-catalog/families family-id])
+         targets (:annotation/target-categories family)
+         anchor (:annotation/default-anchor family)]
+     (when-not (= :annotation (:family/domain family))
+       (throw (ex-info "family is not an annotation family" {:family-id family-id})))
+     (->> elements
+          (filter #(or (empty? targets) (contains? targets (:kind %))))
+          (keep (fn [element]
+                  (when-let [point (element-anchor-point element anchor)]
+                    (let [bound (into {}
+                                      (map (fn [[parameter path]]
+                                             [parameter (get-in element path)]))
+                                      (:annotation/label-bindings family))
+                          annotation-id (str id-prefix "-" (:id element))]
+                      (instantiate-annotation-family
+                       catalog family-id type-key annotation-id
+                       (merge bound overrides)
+                       {:point (mapv + point offset)
+                        :references [{:element-id (:id element) :anchor anchor}]})))))
+          vec))))
+
 (defn apply-view-template
   "Resolve a drawing view and template into renderer options. View overrides
   win without mutating the shared template."

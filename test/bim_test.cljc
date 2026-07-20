@@ -1651,6 +1651,33 @@
            (get-in associated [:view/annotations 1 :annotation/association-status])))
     (is (= :orphaned (:annotation/association-status orphaned)))))
 
+(deftest annotation-families-bind-element-labels-and-auto-tag-categories
+  (let [tag-family
+        (integration/annotation-family-definition
+         {:id "wall-tag" :name "Wall Tag" :target-categories [:wall]
+          :default-anchor :midpoint
+          :label-bindings {:label [:name] :mark [:id]}
+          :parameters {:label {:type :text :scope :instance :default "Wall"}
+                       :mark {:type :number :scope :instance :default 0}
+                       :prefix {:type :text :scope :type :default "W"}}
+          :types {:standard {:name "Standard" :parameters {:prefix "W"}}}
+          :template {:kind :tag :text [:param :label]
+                     :mark [:param :mark] :prefix [:param :prefix]}})
+        catalog (integration/family-catalog [tag-family])
+        walls [(bim/wall {:id 270 :name "Exterior" :start [0 0 0] :end [6 0 0]})
+               (bim/wall {:id 271 :name "Interior" :start [0 2 0] :end [4 2 0]})]
+        slab (bim/slab {:id 272 :name "Floor"
+                        :boundary [[0 0 0] [6 0 0] [6 4 0] [0 4 0]] :thickness 0.2})
+        tags (integration/tag-elements-with-family
+              catalog "wall-tag" :standard (conj walls slab) {:offset [0 0.2]})]
+    (is (= :annotation (:family/domain tag-family)))
+    (is (= 2 (count tags)))
+    (is (= ["Exterior" "Interior"] (mapv :text tags)))
+    (is (= [[3.0 0.2] [2.0 2.2]] (mapv :point tags)))
+    (is (= [270 271] (mapv #(get-in % [:references 0 :element-id]) tags)))
+    (is (= "wall-tag" (:annotation/family-id (first tags))))
+    (is (= "W" (:prefix (first tags))))))
+
 (deftest detail-callouts-link-cropped-model-views
   (let [wall (bim/wall {:id 301 :start [0 0 0] :end [6 0 0] :height 3.0})
         storey (bim/storey {:id 40 :name "Callout Plan" :elevation 0 :height 3
