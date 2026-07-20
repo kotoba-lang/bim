@@ -391,6 +391,42 @@
     (is (= "12345678-1234-4abc-8def-1234567890ab"
            (get-in imported [:family/shared-parameters :fire-rating :guid])))))
 
+(deftest parameter-driven-linear-and-radial-family-arrays
+  (let [family (integration/family-definition
+                {:id "array-family" :name "Array Family" :category :furniture
+                 :parameters {:count {:type :integer :default 3 :min 1 :max 20}
+                              :spacing {:type :length :default 0.6}}
+                 :template
+                 {:kind :furniture :name "Array Family"
+                  :linear-components
+                  {:family/array {:kind :linear :count [:param :count]
+                                  :spacing [:param :spacing] :direction [1 0 0]
+                                  :item {:id "post" :kind :furniture
+                                         :placement {:location [0 0 0]}}}}
+                  :radial-components
+                  {:family/array {:kind :radial :count 4
+                                  :angle [:/ #?(:clj Math/PI :cljs js/Math.PI) 2]
+                                  :center [0 0 0]
+                                  :item {:id "chair" :kind :furniture
+                                         :placement {:location [2 0 0]
+                                                     :ref-direction [1 0 0]}}}}}})
+        instance (integration/instantiate-family family 74 {:count 4 :spacing 0.75})
+        linear (:linear-components instance)
+        radial (:radial-components instance)]
+    (is (= 4 (count linear)))
+    (is (= [[0.0 0.0 0.0] [0.75 0.0 0.0] [1.5 0.0 0.0] [2.25 0.0 0.0]]
+           (mapv #(get-in % [:placement :location]) linear)))
+    (is (= ["post-0" "post-1" "post-2" "post-3"] (mapv :id linear)))
+    (is (= [[2.0 0.0 0.0] [0.0 2.0 0.0] [-2.0 0.0 0.0] [0.0 -2.0 0.0]]
+           (mapv (fn [item]
+                   (mapv #(let [rounded (#?(:clj Math/round :cljs js/Math.round) (* % 1.0e9))]
+                            (/ rounded 1.0e9))
+                         (get-in item [:placement :location]))) radial)))
+    (is (= [0 1 2 3] (mapv :family/array-index radial)))
+    (is (thrown-with-msg? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+                          #"below minimum"
+                          (integration/instantiate-family family 75 {:count 0})))))
+
 (deftest reference-plane-constraints-drive-family-geometry
   (let [family (integration/family-definition
                 {:id "window-double" :name "Double Window" :category :window

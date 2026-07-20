@@ -480,8 +480,58 @@
 
 (declare instantiate-family*)
 
+(defn- array-item [item array index]
+  (let [kind (or (:kind array) :linear)
+        location (vec (get-in item [:placement :location] [0.0 0.0 0.0]))
+        item
+        (case kind
+          :linear
+          (let [raw-direction (vec (or (:direction array) [1.0 0.0 0.0]))
+                magnitude (sqrt (reduce + (map #(* % %) raw-direction)))
+                direction (mapv #(/ % magnitude) raw-direction)
+                spacing (:spacing array)]
+            (assoc-in item [:placement :location]
+                      (mapv + location (mapv #(* index spacing %) direction))))
+          :radial
+          (let [[cx cy cz] (vec (or (:center array) [0.0 0.0 0.0]))
+                [x y z] location angle (* index (:angle array))
+                cosine (math-cos angle) sine (math-sin angle)
+                rotated [(+ cx (* (- x cx) cosine) (* -1.0 (- y cy) sine))
+                         (+ cy (* (- x cx) sine) (* (- y cy) cosine))
+                         (+ cz (- z cz))]
+                [rx ry rz] (get-in item [:placement :ref-direction] [1.0 0.0 0.0])]
+            (-> item
+                (assoc-in [:placement :location] rotated)
+                (assoc-in [:placement :ref-direction]
+                          [(- (* rx cosine) (* ry sine))
+                           (+ (* rx sine) (* ry cosine)) rz])))
+          (throw (ex-info "unsupported family array kind" {:kind kind})))]
+    (assoc item :id (str (or (:id item) "array-item") "-" index)
+                :family/array-index index)))
+
 (defn- materialize-template [catalog value stack]
   (cond
+    (and (map? value) (:family/array value))
+    (let [{:keys [item] :as array} (:family/array value)
+          array-count (:count array)
+          kind (or (:kind array) :linear)]
+      (when-not (and (number? array-count) (== array-count (long array-count))
+                     (<= 1 array-count 10000))
+        (throw (ex-info "family array count must be an integer from 1 to 10000"
+                        {:count array-count})))
+      (when (and (= :linear kind)
+                 (or (not (number? (:spacing array)))
+                     (not= 3 (count (:direction array)))
+                     (not (every? number? (:direction array)))
+                     (zero? (reduce + (map #(* % %) (:direction array))))))
+        (throw (ex-info "linear family array requires spacing and a 3D direction"
+                        {:array array})))
+      (when (and (= :radial kind) (not (number? (:angle array))))
+        (throw (ex-info "radial family array requires an angle step" {:array array})))
+      (mapv (fn [index]
+              (array-item (materialize-template catalog item stack) array index))
+            (range (long array-count))))
+
     (and (map? value) (:family/ref value))
     (let [family-id (:family/ref value)]
       (when (contains? stack family-id)
@@ -516,7 +566,7 @@
                                       (eval-expr {} %)
                                       :else %)
                                    (:family/template family))
-        body (if catalog (materialize-template catalog substituted stack) substituted)
+        body (materialize-template catalog substituted stack)
         type-spec (get-in family [:family/types type-key])]
     (cond-> (assoc body :id instance-id
                         :family/id (:family/id family)
