@@ -678,6 +678,18 @@
     (:ifcreal :ifclengthmeasure :ifcareameasure :ifcvolumemeasure) (bim/real-value value)
     (bim/text-value (str value))))
 
+(defn- v3+ [a b] (mapv + a b))
+(defn- v3- [a b] (mapv - a b))
+(defn- v3-scale [factor vector] (mapv #(* factor %) vector))
+(defn- v3-dot [a b] (reduce + (map * a b)))
+(defn- v3-cross [[ax ay az] [bx by bz]]
+  [(- (* ay bz) (* az by)) (- (* az bx) (* ax bz)) (- (* ax by) (* ay bx))])
+
+(defn- placement-basis [placement]
+  (let [x (get placement :ref-direction [1.0 0.0 0.0])
+        z (get placement :axis [0.0 0.0 1.0])]
+    {:x x :y (v3-cross z x) :z z}))
+
 (defn- imported-psets [source]
   (into {}
         (map (fn [[name pset]]
@@ -693,10 +705,12 @@
    (fn [host opening]
      (let [host-location (get-in source [:placement :location] [0.0 0.0 0.0])
            opening-location (get-in opening [:placement :location] host-location)
+           basis (placement-basis (:placement source))
            profile (get-in opening [:geometry :profile])
            width (:x-dim profile) height (get-in opening [:geometry :depth])
-           offset (- (first opening-location) (first host-location))
-           sill (- (nth opening-location 2 0.0) (nth host-location 2 0.0))]
+           relative (v3- opening-location host-location)
+           offset (v3-dot relative (:x basis))
+           sill (v3-dot relative (:z basis))]
        (if (and width height)
          (bim/add-opening-to-wall
           host (bim/rectangular-opening {:id (:id opening) :offset offset :sill sill
@@ -708,6 +722,8 @@
 
 (defn- imported-element [source]
   (let [[x y z] (get-in source [:placement :location] [0.0 0.0 0.0])
+        origin [x y z]
+        basis (placement-basis (:placement source))
         geometry (:geometry source)
         profile (:profile geometry)
         x-dim (:x-dim profile) y-dim (:y-dim profile) depth (:depth geometry)
@@ -717,14 +733,18 @@
           :wall (if (and x-dim y-dim depth)
                   (attach-imported-openings
                    (bim/wall {:id (:id source) :name (:name source)
-                              :start [x y z] :end [(+ x x-dim) y z]
+                              :start origin :end (v3+ origin (v3-scale x-dim (:x basis)))
                               :thickness y-dim :height depth}) source)
                   (bim/element {:id (:id source) :kind :wall :name (:name source)
                                 :geometry geometry}))
           :slab (if (and x-dim y-dim depth)
                   (bim/slab {:id (:id source) :name (:name source)
-                             :boundary [[x y z] [(+ x x-dim) y z]
-                                        [(+ x x-dim) (+ y y-dim) z] [x (+ y y-dim) z]]
+                             :boundary [origin
+                                        (v3+ origin (v3-scale x-dim (:x basis)))
+                                        (v3+ origin
+                                             (v3+ (v3-scale x-dim (:x basis))
+                                                  (v3-scale y-dim (:y basis))))
+                                        (v3+ origin (v3-scale y-dim (:y basis)))]
                              :thickness depth})
                   (bim/element {:id (:id source) :kind :slab :name (:name source)
                                 :geometry geometry}))
