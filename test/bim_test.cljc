@@ -181,3 +181,43 @@
     (is (= project (ifc/read-spf spf)))
     (is (re-find #"<svg" svg))
     (is (re-find #"<line" svg))))
+
+(deftest imports-external-ifc-hierarchy-and-wall-geometry
+  (let [document {:ifc/schema "IFC4X3_ADD2"
+                  :ifc/project {:id 1 :global-id "project-guid" :name "Tower"
+                                :type :ifcproject
+                                :children [{:id 2 :name "Site" :type :ifcsite
+                                            :children [{:id 3 :name "Building" :type :ifcbuilding
+                                                        :children [{:id 4 :name "Ground" :type :ifcbuildingstorey
+                                                                    :placement {:location [0 0 0]}
+                                                                    :children []}]}]}]}
+                  :ifc/elements [{:id 100 :global-id "wall-guid" :name "External Wall"
+                                  :kind :wall :container-id 4
+                                  :placement {:location [10 20 0]}
+                                  :property-sets {"Pset_WallCommon"
+                                                  {:name "Pset_WallCommon"
+                                                   :properties {"IsExternal" {:value true :value-type :ifcboolean}
+                                                                "FireRating" {:value "2 HR" :value-type :ifclabel}}}}
+                                  :openings [{:id 110 :kind :opening :filled-by 120
+                                              :placement {:location [12 20 0]}
+                                              :geometry {:kind :extruded-area-solid
+                                                         :profile {:kind :rectangle :x-dim 0.9 :y-dim 0.25}
+                                                         :depth 2.1}}]
+                                  :geometry {:kind :extruded-area-solid
+                                             :profile {:kind :rectangle :x-dim 8.0 :y-dim 0.25}
+                                             :direction [0 0 1] :depth 3.2}}]
+                  :ifc/units {:lengthunit {:kind :si :type :lengthunit :name :metre :scale 1.0}}}
+        project (integration/import-external-ifc document)
+        storey (bim/find-storey project 4)
+        wall (first (:elements storey))]
+    (is (= "Tower" (:name project)))
+    (is (= "Ground" (:name storey)))
+    (is (= "wall-guid" (:global-id wall)))
+    (is (= [[10 20 0] [18.0 20 0]] (get-in wall [:geometry :axis])))
+    (is (= 0.25 (get-in wall [:geometry :profile :thickness])))
+    (is (= 3.2 (get-in wall [:geometry :profile :height])))
+    (is (= :metre (get-in project [:units :length])))
+    (is (true? (get-in wall [:psets "Pset_WallCommon" :props :IsExternal :value])))
+    (is (= "2 HR" (get-in wall [:psets "Pset_WallCommon" :props :FireRating :value])))
+    (is (= {:offset 2 :sill 0} (get-in wall [:openings 0 :placement])))
+    (is (= 120 (get-in wall [:openings 0 :filled-by])))))
