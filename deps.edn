@@ -1,10 +1,10 @@
 {:paths ["src" "test"]
  :deps {io.github.kotoba-lang/org-iso-16739
         {:git/url "https://github.com/kotoba-lang/org-iso-16739.git"
-         :git/sha "7e035ed8567dd3a7d634e472db5b9923fe3c8243"}
+         :git/sha "b3db042bce1f842dbb1552e8bff40987b0ba9192"}
         io.github.kotoba-lang/org-iso-10303
         {:git/url "https://github.com/kotoba-lang/org-iso-10303.git"
-         :git/sha "84549d0c3419a5de8c0ddf004c06694c933b87dc"}
+         :git/sha "1e5c7d1bf4e9343bc012d56662228173da6f6082"}
         io.github.kotoba-lang/svg
         {:git/url "https://github.com/kotoba-lang/org-w3-svg.git"
          :git/sha "85ed9094977ea3744edfa892a59cfd19dd3be8d1"}
