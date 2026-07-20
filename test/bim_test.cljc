@@ -259,6 +259,57 @@
     (is (== 2.52 (get-in door [:quantities :gross-area-m2])))
     (is (= "door-single" (:family/id door)))))
 
+(deftest family-types-constraints-and-nested-instances
+  (let [handle (integration/family-definition
+                {:id "handle" :name "Handle" :category :furniture
+                 :parameters {:length {:type :length :scope :instance :default 0.2 :min 0.1}}
+                 :template {:kind :furniture :name "Handle"
+                            :geometry {:kind :handle :length [:param :length]}}})
+        cabinet (integration/family-definition
+                 {:id "cabinet" :name "Cabinet" :category :furniture
+                  :parameters {:width {:type :length :scope :type :default 0.8 :min 0.4}
+                               :height {:type :length :scope :instance :default 2.0 :max 3.0}}
+                  :formulas {:double-area [:* [:param :area] 2.0]
+                             :area [:* [:param :width] [:param :height]]}
+                  :constraints [{:kind :equal :left [:param :double-area]
+                                 :right [:* [:param :width] [:param :height] 2.0]}]
+                  :types {:wide {:id "cabinet-wide" :global-id "cabinet-wide-guid"
+                                 :name "Wide" :parameters {:width 1.2}
+                                 :predefined-type :notdefined}}
+                  :template {:kind :furniture :name "Cabinet"
+                             :geometry {:kind :cabinet :width [:param :width]
+                                        :height [:param :height]}
+                             :components [{:family/ref "handle" :id "handle-1"
+                                           :overrides {:length [:param :width]}}]}})
+        catalog (integration/family-catalog [handle cabinet])
+        instance (integration/instantiate-family-type catalog "cabinet" :wide 70 {:height 2.4})]
+    (is (= 1.2 (get-in instance [:geometry :width])))
+    (is (= 2.4 (get-in instance [:geometry :height])))
+    (is (== 5.76 (get-in instance [:family/parameters :double-area])))
+    (is (= "cabinet-wide" (get-in instance [:type-object :id])))
+    (is (= 1.2 (get-in instance [:components 0 :geometry :length])))
+    (is (= "handle" (get-in instance [:components 0 :family/id])))
+    (is (thrown-with-msg? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+                          #"instance cannot override type parameter"
+                          (integration/instantiate-family-type catalog "cabinet" :wide 71
+                                                               {:width 1.5})))))
+
+(deftest rejects-family-formula-and-nesting-cycles
+  (let [formula-cycle (integration/family-definition
+                       {:id "cycle" :parameters {}
+                        :formulas {:a [:+ [:param :b] 1] :b [:+ [:param :a] 1]}
+                        :template {}})
+        nested-cycle (integration/family-definition
+                      {:id "nested" :parameters {}
+                       :template {:components [{:family/ref "nested" :id "self"}]}})
+        catalog (integration/family-catalog [nested-cycle])]
+    (is (thrown-with-msg? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+                          #"dependency cycle"
+                          (integration/resolve-family-parameters formula-cycle {})))
+    (is (thrown-with-msg? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+                          #"nested family cycle"
+                          (integration/instantiate-family-type catalog "nested" nil 1 {})))))
+
 (deftest drawings-ifc-collaboration-and-itonami-contract
   (let [project (integrated-project)
         drawings (integration/generate-drawing-set project)
