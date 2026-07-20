@@ -891,6 +891,42 @@
           {:roughness-m 1.5e-6 :density-kg-m3 998.0 :viscosity-pa-s 0.001}
           {:available-diameters-m [0.063] :max-velocity-m-s 2.0})))))
 
+(deftest includes-minor-static-losses-and-selects-equipment-operating-point
+  (let [loss (integration/pressure-loss
+              {:length-m 10.0 :diameter-m 0.1 :roughness-m 1.5e-6
+               :flow-m3-s 0.01 :density-kg-m3 998.0 :viscosity-pa-s 0.001
+               :minor-loss-coefficient 2.5 :elevation-change-m 5.0})
+        system-curve {:static-pressure-pa 10000.0 :curve-coefficient 2.0e9}
+        catalog [{:id :pump-a :kind :pump :shutoff-pressure-pa 100000.0
+                  :curve-coefficient 1.0e9 :efficiency 0.7
+                  :rated-flow-m3-s 0.006}
+                 {:id :pump-b :kind :pump :shutoff-pressure-pa 120000.0
+                  :curve-coefficient 5.0e8 :efficiency 0.5
+                  :rated-flow-m3-s 0.008}]
+        point (integration/equipment-operating-point (first catalog) system-curve)
+        selected (integration/select-mep-equipment
+                  catalog system-curve
+                  {:required-flow-m3-s 0.005 :required-pressure-pa 60000.0})]
+    (is (pos? (:mep/friction-pressure-loss-pa loss)))
+    (is (pos? (:mep/minor-pressure-loss-pa loss)))
+    (is (> (:mep/static-pressure-change-pa loss) 48000.0))
+    (is (= (:mep/pressure-loss-pa loss)
+           (+ (:mep/friction-pressure-loss-pa loss)
+              (:mep/minor-pressure-loss-pa loss)
+              (:mep/static-pressure-change-pa loss))))
+    (is (< (#?(:clj Math/abs :cljs js/Math.abs)
+            (- (:mep.equipment/flow-m3-s point)
+               (#?(:clj Math/sqrt :cljs js/Math.sqrt) 3.0e-5)))
+           1.0e-9))
+    (is (= :pump-a (:mep.equipment/id selected)))
+    (is (pos? (:mep.equipment/input-power-w selected)))
+    (is (thrown-with-msg?
+         #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+         #"no MEP equipment"
+         (integration/select-mep-equipment
+          catalog system-curve
+          {:required-flow-m3-s 0.02 :required-pressure-pa 200000.0})))))
+
 (deftest ifc-system-and-connector-graph-round-trip
   (let [connector-a (integration/mep-connector
                      {:id "port-a" :point [1 0 0] :direction [1 0 0] :domain :piping
