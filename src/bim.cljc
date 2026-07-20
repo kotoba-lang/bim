@@ -641,6 +641,20 @@
               :psets {"Pset_SlabCommon" (property-set "Pset_SlabCommon" {:IsExternal (bool-value false)})}
               :openings [] :connected-to []})))
 
+(defn- polygon-surface-area [boundary]
+  (reduce
+   +
+   (map (fn [index]
+          (let [[[ax ay az] [bx by bz] [cx cy cz]]
+                [(first boundary) (nth boundary index) (nth boundary (inc index))]
+                ux (- bx ax) uy (- by ay) uz (- bz az)
+                vx (- cx ax) vy (- cy ay) vz (- cz az)
+                nx (- (* uy vz) (* uz vy))
+                ny (- (* uz vx) (* ux vz))
+                nz (- (* ux vy) (* uy vx))]
+            (* 0.5 (sqrt (+ (* nx nx) (* ny ny) (* nz nz))))))
+        (range 1 (dec (count boundary))))))
+
 (defn set-slab-layers
   "Apply an ordered floor/ceiling build-up and derive layer quantities."
   [slab-element layers]
@@ -654,7 +668,9 @@
                    (contains? material-categories (:category layer)))
       (throw (ex-info "invalid compound slab layer" {:layer layer}))))
   (let [thickness (reduce + (map :thickness layers))
-        gross-area (polygon-area (get-in slab-element [:geometry :boundary]))
+        boundary (get-in slab-element [:geometry :boundary])
+        gross-area (if (:slab/shape-edited? slab-element)
+                     (polygon-surface-area boundary) (polygon-area boundary))
         opening-area (reduce + 0.0 (map #(polygon-area (:boundary %))
                                        (:openings slab-element)))
         net-area (- gross-area opening-area)
@@ -708,6 +724,34 @@
   (let [updated (update slab-element :openings
                         #(vec (remove (fn [opening] (= opening-id (:id opening))) %)))]
     (set-slab-layers updated (:material-layers updated))))
+
+(defn set-slab-vertex-elevations
+  "Shape-edit a slab by assigning an absolute Z elevation to every ordered
+  boundary vertex. Constant thickness remains vertical."
+  [slab-element elevations]
+  (let [boundary (get-in slab-element [:geometry :boundary])]
+    (when-not (= :slab (:kind slab-element))
+      (throw (ex-info "shape editing requires a slab" {:element-id (:id slab-element)})))
+    (when (seq (:openings slab-element))
+      (throw (ex-info "remove slab openings before boundary shape editing"
+                      {:element-id (:id slab-element)})))
+    (when-not (and (= (count boundary) (count elevations))
+                   (every? finite-number? elevations))
+      (throw (ex-info "slab shape elevations must match boundary vertices"
+                      {:vertices (count boundary) :elevations elevations})))
+    (let [shaped (mapv (fn [[x y _] z] [x y z]) boundary elevations)
+          surface-area (polygon-surface-area shaped)
+          projected-area (polygon-area shaped)
+          thickness (get-in slab-element [:geometry :thickness])]
+      (-> slab-element
+          (assoc-in [:geometry :boundary] shaped)
+          (assoc :slab/shape-edited? true)
+          (assoc :quantities
+                 (merge (:quantities slab-element)
+                        {:gross-area-m2 surface-area :net-area-m2 surface-area
+                         :projected-area-m2 projected-area
+                         :gross-volume-m3 (* projected-area thickness)
+                         :net-volume-m3 (* projected-area thickness)}))))))
 
 (declare planar-rings-mesh merge-meshes)
 (defn- ring-side-mesh [ring thickness inward?]
@@ -1719,7 +1763,8 @@
 (defn element-mesh [element]
   (case (:kind element)
     :wall (wall-with-openings-mesh element)
-    :slab (slab-mesh element)
+    :slab (if (= :slab-extrusion (get-in element [:geometry :kind]))
+            (slab-mesh element) (geometry-mesh (:geometry element)))
     (geometry-mesh (:geometry element))))
 
 (defn add-opening-to-wall [wall opening]
