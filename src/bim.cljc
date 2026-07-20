@@ -421,17 +421,21 @@
               (:faces geometry))]
     (when (seq face-meshes) (merge-meshes face-meshes))))
 
+(declare cylindrical-face-mesh)
 (defn- advanced-brep-mesh [geometry]
   (let [face-meshes
         (keep (fn [face]
-                (when (= :plane (get-in face [:surface :kind]))
+                (case (get-in face [:surface :kind])
+                  :plane
                   (let [ordered (sort-by #(if (= :outer (:kind %)) 0 1) (:bounds face))
                         rings (mapv (fn [bound]
                                       (cond-> (vec (:points bound))
                                         (false? (:orientation bound)) reverse
                                         (false? (:same-sense face)) reverse))
                                     ordered)]
-                    (planar-rings-mesh rings))))
+                    (planar-rings-mesh rings))
+                  :cylinder (cylindrical-face-mesh face)
+                  nil))
               (:faces geometry))]
     (when (seq face-meshes) (merge-meshes face-meshes))))
 
@@ -462,6 +466,56 @@
   (let [length (sqrt (reduce + (map #(* % %) v)))]
     (if (pos? length) (mapv #(/ % length) v) [0.0 0.0 0.0])))
 (defn- v3-dot [a b] (reduce + (map * a b)))
+
+(defn- cylindrical-face-mesh [face]
+  (let [surface (:surface face) position (:position surface)
+        origin (point3 (:location position))
+        z-axis (v3-normalize (point3 (or (:axis position) [0 0 1])))
+        x-axis (v3-normalize (point3 (or (:ref-direction position) [1 0 0])))
+        y-axis (v3-normalize (v3-cross z-axis x-axis))
+        points (vec (mapcat :points (:bounds face)))
+        local (mapv (fn [point]
+                      (let [delta (v3-sub (point3 point) origin)]
+                        [(v3-dot delta x-axis) (v3-dot delta y-axis) (v3-dot delta z-axis)]))
+                    points)
+        zs (map #(nth % 2) local)
+        full-circle? (some (fn [edge]
+                             (and (= :circle (get-in edge [:curve :kind]))
+                                  (= (:start edge) (:end edge))))
+                           (mapcat :edges (:bounds face)))]
+    (when (seq zs)
+      (let [z0 (reduce min zs) z1 (reduce max zs)
+            angles (map (fn [[x y _]] (#?(:clj Math/atan2 :cljs js/Math.atan2) y x)) local)
+            start (if full-circle? 0.0 (reduce min angles))
+            end (if full-circle? (* 2.0 #?(:clj Math/PI :cljs js/Math.PI)) (reduce max angles))
+            segments (if full-circle? 24
+                         (max 3 (long (#?(:clj Math/ceil :cljs js/Math.ceil)
+                                       (/ (- end start)
+                                          (/ #?(:clj Math/PI :cljs js/Math.PI) 12.0))))))
+            ring-count (if full-circle? segments (inc segments))
+            radius (:radius surface)
+            sample (fn [z i]
+                     (let [theta (+ start (* (- end start) (/ i segments)))
+                           radial (mapv +
+                                        (mapv #(* (#?(:clj Math/cos :cljs js/Math.cos) theta) %) x-axis)
+                                        (mapv #(* (#?(:clj Math/sin :cljs js/Math.sin) theta) %) y-axis))]
+                       {:position (mapv + origin (mapv #(* radius %) radial)
+                                        (mapv #(* z %) z-axis))
+                        :normal (if (false? (:same-sense face)) (mapv #(- %) radial) radial)}))
+            vertices (vec (concat (map #(sample z0 %) (range ring-count))
+                                  (map #(sample z1 %) (range ring-count))))
+            next-index (fn [i] (if full-circle? (mod (inc i) ring-count) (inc i)))
+            side-count (if full-circle? ring-count (dec ring-count))
+            raw-indices (vec (mapcat (fn [i]
+                                       (let [j (next-index i)
+                                             a i b j c (+ ring-count i) d (+ ring-count j)]
+                                         [a b c b d c]))
+                                     (range side-count)))
+            indices (if (false? (:same-sense face))
+                      (vec (mapcat (fn [[a b c]] [a c b]) (partition 3 raw-indices)))
+                      raw-indices)]
+        {:positions (mapv :position vertices) :normals (mapv :normal vertices)
+         :indices indices}))))
 
 (defn- clipped-extrusion [extrusion half-space]
   (let [z-axis (v3-normalize (point3 (or (get-in extrusion [:position :axis]) [0 0 1])))

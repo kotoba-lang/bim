@@ -153,6 +153,37 @@
                                 (- (* (- bx ax) (- cy ay)) (* (- by ay) (- cx ax)))) 2.0)))
                         (partition 3 (:indices mesh))))))))
 
+(deftest cylindrical-advanced-face-projection
+  (let [ring (fn [z]
+               (mapv (fn [i]
+                       (let [theta (* 2.0 #?(:clj Math/PI :cljs js/Math.PI) (/ i 24.0))]
+                         [(* 2.0 (#?(:clj Math/cos :cljs js/Math.cos) theta))
+                          (* 2.0 (#?(:clj Math/sin :cljs js/Math.sin) theta)) z]))
+                     (range 24)))
+        start [2.0 0.0 0.0]
+        element (bim/element
+                 {:id 66 :kind :other :name "Advanced cylinder"
+                  :geometry {:kind :advanced-brep
+                             :faces [{:same-sense true
+                                      :surface {:kind :cylinder :radius 2.0
+                                                :position {:location [0 0 0]
+                                                           :axis [0 0 1]
+                                                           :ref-direction [1 0 0]}}
+                                      :bounds [{:kind :outer :orientation true
+                                                :points (vec (concat (ring 0.0) (ring 3.0)))
+                                                :edges [{:kind :edge-curve :start start :end start
+                                                         :curve {:kind :circle :radius 2.0}}]}]}]}})
+        mesh (bim/element-mesh element)]
+    (is (= 48 (count (:positions mesh))))
+    (is (= 144 (count (:indices mesh))))
+    (is (= 0.0 (reduce min (map #(nth % 2) (:positions mesh)))))
+    (is (= 3.0 (reduce max (map #(nth % 2) (:positions mesh)))))
+    (is (every? #(< (#?(:clj Math/abs :cljs js/Math.abs)
+                       (- 2.0 (#?(:clj Math/sqrt :cljs js/Math.sqrt)
+                               (+ (* (first %) (first %)) (* (second %) (second %))))))
+                    1.0e-9)
+                (:positions mesh)))))
+
 (deftest circular-and-swept-disk-mesh-projection
   (let [column (bim/element {:id 61 :kind :column :name "Round"
                              :geometry {:kind :extruded-area-solid
