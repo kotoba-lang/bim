@@ -321,7 +321,13 @@
                             {:id (:id storey) :global-id (:global-id storey) :name (:name storey)
                              :type :ifcbuildingstorey :elevation (:elevation storey)
                              :placement (when (map? (:placement storey)) (:placement storey))
-                             :children []})
+                             :children
+                             (mapv (fn [space]
+                                     {:id (:id space) :global-id (:global-id space)
+                                      :name (:name space) :long-name (:long-name space)
+                                      :type :ifcspace :placement (:placement space)
+                                      :children []})
+                                   (:spaces storey))})
                           (:storeys building))})
                  (:buildings site))})
         (:sites project)))
@@ -330,13 +336,27 @@
   "Create a lossless, EDN-native IFC 4.3 semantic exchange document. This is
   the canonical boundary consumed by STEP/JSON adapters; it is not STEP text."
   [project]
-  (ifc/exchange-document
-   {:project {:id (:id project) :global-id (str (:id project)) :name (:name project)
-              :georeference (or (:ifc/georeference project) (:georeference project))
-              :children (exported-spatial-tree project) :model project}
-    :elements (mapv (fn [[storey element]] (exported-element storey element))
-                    (mapcat (fn [storey] (map #(vector storey %) (:elements storey)))
-                            (all-storeys project)))}))
+  (let [source (:ifc/source-document project)
+        exchange (ifc/exchange-document
+                  {:project (cond-> {:id (:id project) :global-id (str (:id project))
+                                     :name (:name project)
+                                     :georeference (or (:ifc/georeference project)
+                                                       (:georeference project))
+                                     :children (exported-spatial-tree project)}
+                              (nil? source) (assoc :model project))
+                   :elements (mapv (fn [[storey element]] (exported-element storey element))
+                                   (mapcat (fn [storey]
+                                             (map #(vector storey %) (:elements storey)))
+                                           (all-storeys project)))})]
+    (if source
+      (merge exchange
+             (select-keys source [:ifc/schema :ifc/source :ifc/raw-spf
+                                  :ifc/raw-entities :ifc/raw-entity-count
+                                  :ifc/raw-type-frequencies :ifc/import-fingerprint])
+             {:ifc/units (:ifc/units source)
+              :ifc/georeference (or (:ifc/georeference project)
+                                    (:ifc/georeference source))})
+      exchange)))
 
 (defn import-ifc [document]
   (when-not (= "IFC4X3_ADD2" (:ifc/schema document))
@@ -432,19 +452,36 @@
           storey-models (into {}
                               (map (fn [node]
                                      [(:id node)
-                                      (bim/storey {:id (:id node) :name (:name node)
-                                                   :elevation (or (get-in node [:placement :location 2]) 0.0)
-                                                   :height 3.0 :placement (:placement node)
-                                                   :spaces []
-                                                   :elements (mapv imported-element
-                                                                   (get elements-by-storey (:id node)))})]))
+                                      (assoc
+                                       (bim/storey
+                                        {:id (:id node) :name (:name node)
+                                         :elevation (or (get-in node [:placement :location 2]) 0.0)
+                                         :height 3.0 :placement (:placement node)
+                                         :spaces
+                                         (mapv (fn [space]
+                                                 (assoc (bim/space
+                                                         {:id (:id space)
+                                                          :name (:name space)
+                                                          :long-name (:long-name space)
+                                                          :category :other
+                                                          :boundary [] :height 3.0
+                                                          :quantities {} :psets {}})
+                                                        :global-id (:global-id space)
+                                                        :placement (:placement space)))
+                                               (filter (comp #{:ifcspace} :type)
+                                                       (:children node)))
+                                         :elements (mapv imported-element
+                                                         (get elements-by-storey (:id node)))})
+                                       :global-id (:global-id node))]))
                               storeys)
           building-models (mapv (fn [node]
-                                  (bim/building {:id (:id node) :name (:name node)
-                                                 :placement (:placement node) :reference-elevation 0.0
-                                                 :storeys (mapv #(get storey-models (:id %))
-                                                                (filter (comp #{:ifcbuildingstorey} :type)
-                                                                        (:children node)))}))
+                                  (assoc
+                                   (bim/building {:id (:id node) :name (:name node)
+                                                  :placement (:placement node) :reference-elevation 0.0
+                                                  :storeys (mapv #(get storey-models (:id %))
+                                                                 (filter (comp #{:ifcbuildingstorey} :type)
+                                                                         (:children node)))})
+                                   :global-id (:global-id node)))
                                 buildings)
           site-node (first sites)
           georeference (:ifc/georeference document)
@@ -456,15 +493,18 @@
        :units (imported-unit-system document)
        :world-origin (or (:world-origin georeference) [0.0 0.0 0.0])
        :true-north-rad true-north-rad :ifc/georeference georeference
+       :ifc/schema (:ifc/schema document) :ifc/source-document document
        :psets {}
-       :sites [(bim/site {:id (or (:id site-node) 1) :name (or (:name site-node) "Site")
-                          :geo (when site-node
-                                 (bim/geo-ref
-                                  (compound->decimal-degrees (:latitude site-node))
-                                  (compound->decimal-degrees (:longitude site-node))
-                                  (:elevation site-node)))
-                          :placement (:placement site-node)
-                          :buildings building-models})]})))
+       :sites [(assoc
+                (bim/site {:id (or (:id site-node) 1) :name (or (:name site-node) "Site")
+                           :geo (when site-node
+                                  (bim/geo-ref
+                                   (compound->decimal-degrees (:latitude site-node))
+                                   (compound->decimal-degrees (:longitude site-node))
+                                   (:elevation site-node)))
+                           :placement (:placement site-node)
+                           :buildings building-models})
+                :global-id (:global-id site-node))]})))
 
 (defn import-ifc-spf [text]
   (import-external-ifc (ifc/read-document text)))
