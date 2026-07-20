@@ -1643,3 +1643,34 @@
          #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
          #"cut a hosted opening"
          (bim/set-wall-axis wall [[0.0 0.0 0.0] [5.0 0.0 0.0]])))))
+
+(deftest compound-wall-layers-drive-geometry-quantities-openings-and-ifc
+  (let [layers [(bim/material-layer "Concrete" 0.10 false :concrete)
+                (bim/material-layer "Insulation" 0.05 false :insulation)]
+        wall (-> (bim/compound-wall {:id 50 :start [0.0 0.0 0.0] :end [10.0 0.0 0.0]
+                                     :height 3.0 :layers layers})
+                 (bim/add-opening-to-wall
+                  (bim/rectangular-opening {:id 51 :offset 4.0 :width 2.0 :height 1.0})))
+        layer-meshes (bim/wall-layer-meshes wall)
+        mesh (bim/element-mesh wall)
+        project (-> (integrated-project)
+                    (bim/update-element 3 10 (constantly wall)))
+        exported (integration/export-ifc project)
+        exported-layers (get-in exported [:ifc/elements 0 :material :layer-set :layers])]
+    (is (< (#?(:clj Math/abs :cljs js/Math.abs)
+            (- 0.15 (get-in wall [:geometry :profile :thickness]))) 1.0e-12))
+    (is (< (#?(:clj Math/abs :cljs js/Math.abs)
+            (- 4.5 (get-in wall [:quantities :gross-volume-m3]))) 1.0e-12))
+    (is (< (#?(:clj Math/abs :cljs js/Math.abs)
+            (- 4.2 (get-in wall [:quantities :net-volume-m3]))) 1.0e-12))
+    (is (= [3.0 1.5] (mapv :gross-volume-m3 (:material-layers wall))))
+    (is (= 2 (count layer-meshes)))
+    (is (every? #(seq (:indices %)) layer-meshes))
+    (is (> (count (:positions mesh)) 16) "opening cuts every layer mesh")
+    (is (= [0.10 0.05] (mapv :thickness exported-layers)))
+    (is (= ["Concrete" "Insulation"]
+           (mapv #(get-in % [:material :name]) exported-layers)))
+    (is (thrown-with-msg?
+         #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+         #"invalid compound wall layer"
+         (bim/set-wall-layers wall [(bim/material-layer "Bad" 0 false :other)])))))
