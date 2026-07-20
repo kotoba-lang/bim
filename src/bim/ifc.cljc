@@ -9,3 +9,6 @@
   (ifc/write-spf (update (integration/export-ifc project) :ifc/project dissoc :model)))
 (def read-spf ifc/read-spf)
 (def read-document ifc/read-document)
+(def semantic-fingerprint ifc/semantic-fingerprint)
+(def roundtrip-report ifc/roundtrip-report)
+(def corpus-report ifc/corpus-report)
