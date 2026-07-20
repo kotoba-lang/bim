@@ -256,3 +256,108 @@
     {:panel/id id :panel/assignments (:assignments balance)
      :panel/phase-loads-va demanded-loads :panel/phase-currents-a phase-currents
      :panel/imbalance-percent imbalance :panel/voltage-drops drops :panel/issues issues}))
+
+(defn analyze-electrical-feeder
+  "Calculate design current, complex-impedance voltage drop, and prospective
+  short-circuit current for a single- or three-phase feeder."
+  [{:keys [id phases apparent-power-va voltage-v power-factor length-m
+           resistance-ohm-m reactance-ohm-m source-resistance-ohm
+           source-reactance-ohm cable-ampacity-a max-voltage-drop-percent]
+    :or {phases 3 power-factor 1.0 reactance-ohm-m 0.0
+         source-resistance-ohm 0.0 source-reactance-ohm 0.0
+         max-voltage-drop-percent 3.0}}]
+  (when-not (and id (#{1 3} phases) (pos? (or apparent-power-va 0.0))
+                 (pos? (or voltage-v 0.0)) (< 0.0 power-factor) (<= power-factor 1.0)
+                 (not (neg? (or length-m -1.0)))
+                 (not (neg? (or resistance-ohm-m -1.0)))
+                 (not (neg? reactance-ohm-m))
+                 (pos? (or cable-ampacity-a 0.0)))
+    (throw (ex-info "invalid electrical feeder design input" {:feeder-id id})))
+  (let [three-phase? (= 3 phases)
+        root-three (sqrt 3.0)
+        current (/ apparent-power-va (* voltage-v (if three-phase? root-three 1.0)))
+        sine (sqrt (max 0.0 (- 1.0 (* power-factor power-factor))))
+        voltage-drop (* (if three-phase? root-three 2.0) current length-m
+                        (+ (* resistance-ohm-m power-factor)
+                           (* reactance-ohm-m sine)))
+        voltage-drop-percent (* 100.0 (/ voltage-drop voltage-v))
+        loop-factor (if three-phase? 1.0 2.0)
+        fault-r (+ source-resistance-ohm (* loop-factor length-m resistance-ohm-m))
+        fault-x (+ source-reactance-ohm (* loop-factor length-m reactance-ohm-m))
+        fault-impedance (sqrt (+ (* fault-r fault-r) (* fault-x fault-x)))
+        _ (when-not (pos? fault-impedance)
+            (throw (ex-info "feeder fault-loop impedance must be positive"
+                            {:feeder-id id})))
+        fault-current (/ voltage-v (* (if three-phase? root-three 1.0)
+                                      fault-impedance))
+        issues (vec (concat
+                     (when (> current cable-ampacity-a)
+                       [{:issue/type :electrical/cable-overload
+                         :design-current-a current :cable-ampacity-a cable-ampacity-a}])
+                     (when (> voltage-drop-percent max-voltage-drop-percent)
+                       [{:issue/type :electrical/feeder-voltage-drop
+                         :percent voltage-drop-percent
+                         :maximum-percent max-voltage-drop-percent}])))]
+    {:electrical.feeder/id id :electrical.feeder/phases phases
+     :electrical.feeder/design-current-a current
+     :electrical.feeder/cable-ampacity-a cable-ampacity-a
+     :electrical.feeder/voltage-drop-v voltage-drop
+     :electrical.feeder/voltage-drop-percent voltage-drop-percent
+     :electrical.feeder/fault-resistance-ohm fault-r
+     :electrical.feeder/fault-reactance-ohm fault-x
+     :electrical.feeder/fault-impedance-ohm fault-impedance
+     :electrical.feeder/prospective-fault-current-a fault-current
+     :electrical.feeder/issues issues}))
+
+(defn select-protective-device
+  "Select the smallest protective device satisfying Ib ≤ In ≤ Iz, breaking
+  capacity, and optional instantaneous fault-clearing criteria."
+  [feeder-analysis catalog]
+  (let [design-current (:electrical.feeder/design-current-a feeder-analysis)
+        cable-ampacity (:electrical.feeder/cable-ampacity-a feeder-analysis)
+        fault-current (:electrical.feeder/prospective-fault-current-a feeder-analysis)
+        candidates
+        (filter (fn [{:keys [rating-a breaking-capacity-a
+                             instantaneous-trip-multiple]}]
+                  (and (number? rating-a) (<= design-current rating-a cable-ampacity)
+                       (number? breaking-capacity-a) (>= breaking-capacity-a fault-current)
+                       (or (nil? instantaneous-trip-multiple)
+                           (<= (* rating-a instantaneous-trip-multiple) fault-current))))
+                catalog)]
+    (when-not (seq candidates)
+      (throw (ex-info "no protective device satisfies feeder duty"
+                      {:design-current-a design-current :cable-ampacity-a cable-ampacity
+                       :fault-current-a fault-current})))
+    (let [device (first (sort-by (juxt :rating-a :breaking-capacity-a (comp str :id))
+                                 candidates))]
+      {:electrical.protection/device device
+       :electrical.protection/load-margin-a (- (:rating-a device) design-current)
+       :electrical.protection/cable-margin-a (- cable-ampacity (:rating-a device))
+       :electrical.protection/breaking-margin-a
+       (- (:breaking-capacity-a device) fault-current)
+       :electrical.protection/instantaneous-threshold-a
+       (when-let [multiple (:instantaneous-trip-multiple device)]
+         (* (:rating-a device) multiple))})))
+
+(defn check-protection-coordination
+  "Check simple instantaneous selectivity between downstream and upstream
+  devices at the calculated downstream fault current."
+  [downstream upstream fault-current-a]
+  (let [threshold (fn [device]
+                    (when-let [multiple (:instantaneous-trip-multiple device)]
+                      (* (:rating-a device) multiple)))
+        downstream-threshold (threshold downstream)
+        upstream-threshold (threshold upstream)
+        downstream-trips? (and downstream-threshold
+                               (<= downstream-threshold fault-current-a))
+        upstream-restrained? (or (:selective-delay? upstream)
+                                 (and upstream-threshold
+                                      (> upstream-threshold fault-current-a)))
+        coordinated? (and (> (:rating-a upstream) (:rating-a downstream))
+                          downstream-trips? upstream-restrained?)]
+    {:electrical.coordination/downstream-id (:id downstream)
+     :electrical.coordination/upstream-id (:id upstream)
+     :electrical.coordination/fault-current-a fault-current-a
+     :electrical.coordination/downstream-threshold-a downstream-threshold
+     :electrical.coordination/upstream-threshold-a upstream-threshold
+     :electrical.coordination/coordinated? (boolean coordinated?)}))
