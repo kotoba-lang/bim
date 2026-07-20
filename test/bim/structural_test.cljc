@@ -61,3 +61,31 @@
                        [:structural.frame/members :ab :local-end-forces :m1])))
     (is (zero? (get-in released
                        [:structural.frame/members :ab :local-end-forces :m2])))))
+
+(deftest constant-strain-triangle-plane-stress-analysis
+  (let [model {:nodes [{:id :a :point [0.0 0.0] :restraints [true true]}
+                       {:id :b :point [1.0 0.0] :restraints [false true]}
+                       {:id :c :point [0.0 1.0] :restraints [false false]}]
+               :elements [{:id :t1 :nodes [:a :b :c] :thickness-m 0.1
+                           :elastic-modulus-pa 2.0e11 :poisson-ratio 0.3}]
+               :loads [{:node :c :fx 1000.0}]}
+        result (structural/analyze-plane-stress-mesh model)
+        clockwise (structural/analyze-plane-stress-mesh
+                   (assoc-in model [:elements 0 :nodes] [:a :c :b]))]
+    (is (= 0.5 (get-in result [:structural.plane-stress/elements :t1 :area-m2])))
+    (is (< (#?(:clj Math/abs :cljs js/Math.abs)
+            (- 2.6e-7 (get-in result [:structural.plane-stress/nodes :c :ux])))
+           1.0e-15))
+    (is (= 20000.0
+           (get-in result [:structural.plane-stress/elements :t1 :stress-pa :tau-xy])))
+    (is (= -1000.0 (get-in result [:structural.plane-stress/nodes :a :rx])))
+    (is (= (get-in result [:structural.plane-stress/nodes :c :ux])
+           (get-in clockwise [:structural.plane-stress/nodes :c :ux])))
+    (is (= (get-in result [:structural.plane-stress/elements :t1 :stress-pa])
+           (get-in clockwise [:structural.plane-stress/elements :t1 :stress-pa])))
+    (is (thrown-with-msg?
+         #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+         #"zero area"
+         (structural/analyze-plane-stress-mesh
+          (-> model
+              (assoc-in [:nodes 2 :point] [2.0 0.0])))))))
