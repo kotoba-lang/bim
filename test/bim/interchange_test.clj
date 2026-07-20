@@ -28,3 +28,21 @@
     (is (= 1 (count (pdf/pages parsed))))
     (is (= ["Ground Plan" "10" "11"]
            (pdf/page-text (:objects parsed) page)))))
+
+(deftest exports-persistent-annotations-to-dxf-and-pdf
+  (let [annotations [{:kind :dimension :from [0 0] :to [6 0] :value 6.0 :label "6000"
+                      :annotation/id :dimension-1}
+                     {:kind :leader :points [[1 0] [1 1] [2 1]] :text "Rated wall"
+                      :annotation/id :leader-1}
+                     {:kind :revision-cloud :points [[0 0] [2 0] [2 2] [0 2]]
+                      :revision "C01" :annotation/id :revision-1}]
+        dxf (interchange/floor-plan-dxf storey {:annotations annotations})
+        bytes (interchange/drawing-set-pdf
+               [storey] {:annotations-by-storey {1 annotations}})
+        parsed (pdf/parse bytes)
+        text (pdf/page-text (:objects parsed) (first (pdf/pages parsed)))]
+    (is (string/includes? dxf "8\nA-DIMS"))
+    (is (string/includes? dxf "8\nA-REVS"))
+    (is (string/includes? dxf "Rated wall"))
+    (is (some #{"6000"} text))
+    (is (some #{"Rated wall"} text))))

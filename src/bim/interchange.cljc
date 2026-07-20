@@ -12,10 +12,31 @@
     {:min [(if (seq xs) (reduce min xs) 0.0) (if (seq ys) (reduce min ys) 0.0)]
      :max [(if (seq xs) (reduce max xs) 10.0) (if (seq ys) (reduce max ys) 10.0)]}))
 
+(defn- annotation-dxf-entities [annotation]
+  (let [layer (case (:kind annotation) :dimension "A-DIMS" :revision-cloud "A-REVS" "A-ANNO")]
+    (case (:kind annotation)
+      :dimension [[:line {:layer layer :from (:from annotation) :to (:to annotation)}]
+                  [:text {:layer layer :at (mapv #(/ (+ %1 %2) 2.0)
+                                                 (:from annotation) (:to annotation))
+                          :height 0.2 :text (or (:label annotation)
+                                                (str (:value annotation) " m"))}]]
+      (:tag :text :level) [[:text {:layer layer :at (:point annotation) :height 0.2
+                                   :text (or (:text annotation) (:label annotation))}]]
+      :leader (concat
+               (map (fn [[from to]] [:line {:layer layer :from from :to to}])
+                    (partition 2 1 (:points annotation)))
+               [[:text {:layer layer :at (last (:points annotation)) :height 0.2
+                        :text (:text annotation)}]])
+      :revision-cloud [[:lwpolyline {:layer layer
+                                     :points (conj (vec (:points annotation))
+                                                   (first (:points annotation)))}]]
+      [])))
+
 (defn floor-plan-dxf
   "Export architectural plan geometry and tags as a valid ASCII DXF document."
-  [storey]
-  (let [entities
+  ([storey] (floor-plan-dxf storey {}))
+  ([storey {:keys [annotations]}]
+   (let [entities
         (concat
          (for [element (:elements storey) :when (= :wall (:kind element))
                :let [[from to] (get-in element [:geometry :axis])]]
@@ -28,10 +49,27 @@
                :let [position (or (get-in element [:placement :location])
                                   (first (get-in element [:geometry :axis])) [0 0 0])]]
            [:text {:layer "A-ANNO" :at position :height 0.2
-                   :text (str (:id element) " " (:name element))}]))]
-    (apply dxf/drawing entities)))
+                   :text (str (:id element) " " (:name element))}])
+         (mapcat annotation-dxf-entities annotations))]
+     (apply dxf/drawing entities))))
 
-(defn- floor-plan-pdf-content [storey {:keys [scale margin page-height]
+(defn- annotation-pdf-commands [annotation point]
+  (let [line (fn [[from to]] (pdf/line-command {:from (point from) :to (point to) :width 0.8}))
+        text (fn [at value] (let [[x y] (point at)]
+                              (pdf/text-command {:x (+ x 3) :y (+ y 3) :size 8 :text value})))]
+    (case (:kind annotation)
+      :dimension [(line [(:from annotation) (:to annotation)])
+                  (text (mapv #(/ (+ %1 %2) 2.0) (:from annotation) (:to annotation))
+                        (or (:label annotation) (str (:value annotation) " m")))]
+      (:tag :text :level) [(text (:point annotation)
+                                      (or (:text annotation) (:label annotation)))]
+      :leader (concat (map line (partition 2 1 (:points annotation)))
+                      [(text (last (:points annotation)) (:text annotation))])
+      :revision-cloud (map line (partition 2 1 (conj (vec (:points annotation))
+                                                     (first (:points annotation)))))
+      [])))
+
+(defn- floor-plan-pdf-content [storey {:keys [scale margin page-height annotations]
                                         :or {scale 40.0 margin 30.0 page-height 595.0}}]
   (let [{lower :min} (storey-extents storey) [min-x min-y] lower
         point (fn [[x y & _]] [(+ margin (* scale (- x min-x)))
@@ -48,15 +86,19 @@
                                      (get-in element [:placement :location]) [0 0 0])
                         [x y] (point position)]]
               (pdf/text-command {:x (+ x 3) :y (+ y 3) :size 8
-                                 :text (str (:id element))}))))))
+                                 :text (str (:id element))}))
+            (mapcat #(annotation-pdf-commands % point) annotations)))))
 
 (defn drawing-set-pdf
   "Export one vector PDF page per storey, suitable for archival or issue."
   ([storeys] (drawing-set-pdf storeys {}))
-  ([storeys {:keys [width height] :or {width 842.0 height 595.0} :as options}]
+  ([storeys {:keys [width height annotations-by-storey]
+             :or {width 842.0 height 595.0} :as options}]
    (pdf/write-document
     (mapv (fn [storey]
             {:width width :height height
              :content (floor-plan-pdf-content storey
-                                              (assoc options :page-height height))})
+                                              (assoc options :page-height height
+                                                     :annotations
+                                                     (get annotations-by-storey (:id storey))))})
           storeys))))

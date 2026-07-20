@@ -1012,6 +1012,50 @@
           #(into [] (remove (fn [annotation]
                               (= annotation-id (:annotation/id annotation)))) %)))
 
+(defn- element-anchor-point [element anchor]
+  (let [axis (get-in element [:geometry :axis])
+        boundary (get-in element [:geometry :boundary])]
+    (some->
+     (cond
+       (= :start anchor) (first axis)
+       (= :end anchor) (second axis)
+       (= :midpoint anchor) (when (= 2 (count axis))
+                              (mapv #(/ (+ %1 %2) 2.0) (first axis) (second axis)))
+       (= :origin anchor) (or (get-in element [:placement :location]) (first axis))
+       (and (map? anchor) (integer? (:vertex anchor)))
+       (get boundary (:vertex anchor))
+       (vector? anchor) anchor
+       :else nil)
+     vec (subvec 0 2))))
+
+(defn reassociate-drawing-annotation
+  "Update associative annotation points from current model geometry. Missing
+  elements/anchors preserve the last graphics and mark the annotation orphaned."
+  [annotation elements]
+  (let [elements-by-id (into {} (map (juxt :id identity) elements))
+        points (mapv (fn [{:keys [element-id anchor]}]
+                       (some-> (get elements-by-id element-id)
+                               (element-anchor-point anchor)))
+                     (:references annotation))]
+    (if (or (empty? points) (some nil? points))
+      (cond-> annotation
+        (seq (:references annotation)) (assoc :annotation/association-status :orphaned))
+      (let [updated
+            (case (:kind annotation)
+              :dimension (-> annotation (assoc :from (first points) :to (second points))
+                             (dissoc :value))
+              (:tag :text :level) (assoc annotation :point (first points))
+              :leader (assoc annotation :points
+                             (assoc (vec (:points annotation)) 0 (first points)))
+              annotation)]
+        (-> updated (assoc :annotation/association-status :associated)
+            drawing-annotation)))))
+
+(defn reassociate-view-annotations [view elements]
+  (update view :view/annotations
+          #(mapv (fn [annotation]
+                   (reassociate-drawing-annotation annotation elements)) %)))
+
 (defn apply-view-template
   "Resolve a drawing view and template into renderer options. View overrides
   win without mutating the shared template."
