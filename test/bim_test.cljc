@@ -1579,3 +1579,32 @@
     (is (= "source-guid" (:global-id source)))
     (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
                  (bim/duplicate-element source 40 "" [0 0 0])))))
+
+(deftest rotation-mirror-and-array-transform-complete-elements
+  (let [wall (bim/wall {:id 10 :start [1.0 0.0 0.0] :end [3.0 0.0 0.0]})
+        quarter-turn (/ #?(:clj Math/PI :cljs js/Math.PI) 2.0)
+        rotated (bim/rotate-element-z wall [0.0 0.0 0.0] quarter-turn)
+        mirrored (bim/mirror-element wall [0.0 0.0 0.0] [1.0 0.0 0.0])
+        linear (bim/linear-array wall [{:id 20 :global-id "linear-1"}
+                                       {:id 21 :global-id "linear-2"}]
+                                 [0.0 2.0 0.0])
+        radial (bim/radial-array wall [{:id 30 :global-id "radial-1"}
+                                       {:id 31 :global-id "radial-2"}]
+                                 [0.0 0.0 0.0] quarter-turn)]
+    (is (= [[0.0 1.0 0.0] [0.0 3.0 0.0]]
+           (mapv #(mapv (fn [n] (if (< (#?(:clj Math/abs :cljs js/Math.abs) n) 1.0e-12)
+                                   0.0 n)) %)
+                 (get-in rotated [:geometry :axis]))))
+    (is (= [[-1.0 0.0 0.0] [-3.0 0.0 0.0]]
+           (get-in mirrored [:geometry :axis])))
+    (is (= [[[1.0 2.0 0.0] [3.0 2.0 0.0]]
+            [[1.0 4.0 0.0] [3.0 4.0 0.0]]]
+           (mapv #(get-in % [:geometry :axis]) linear)))
+    (is (= [20 21] (mapv :id linear)))
+    (is (= "radial-1" (:global-id (first radial))))
+    (is (= [[-1.0 0.0 0.0] [-3.0 0.0 0.0]]
+           (mapv #(mapv (fn [n] (if (< (#?(:clj Math/abs :cljs js/Math.abs) n) 1.0e-12)
+                                   0.0 n)) %)
+                 (get-in (second radial) [:geometry :axis]))))
+    (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+                 (bim/mirror-element wall [0 0 0] [0 0 0])))))
