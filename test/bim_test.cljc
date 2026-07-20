@@ -1530,3 +1530,32 @@
          #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
          #"detail view requires"
          (drawing/detail-view building {:id "invalid" :crop [[0 0] [1 1]]})))))
+
+(deftest element-translation-covers-native-and-external-geometry
+  (let [wall (bim/wall {:id 10 :start [0 0 0] :end [4 0 0]
+                        :thickness 0.2 :height 3.0})
+        moved-wall (bim/translate-element wall [2.0 -1.0 0.5])
+        external {:id 11 :kind :proxy :name "Imported"
+                  :placement {:location [10.0 20.0 0.0]}
+                  :geometry {:kind :collection
+                             :items [{:kind :triangulated-face-set
+                                      :coordinates [[0 0 0] [1 0 0] [0 1 0]]
+                                      :coord-indices [[1 2 3]]}
+                                     {:kind :swept-disk-solid
+                                      :directrix [[0 0 0] [0 0 2]] :radius 0.1}]}}
+        moved-external (bim/translate-element external [-2.0 3.0 1.0])]
+    (is (= [[2.0 -1.0 0.5] [6.0 -1.0 0.5]]
+           (get-in moved-wall [:geometry :axis])))
+    (is (= {:location [2.0 -1.0 0.5]} (:placement moved-wall)))
+    (is (= (:quantities wall) (:quantities moved-wall)))
+    (is (= [8.0 23.0 1.0] (get-in moved-external [:placement :location])))
+    (is (= [[-2.0 3.0 1.0] [-1.0 3.0 1.0] [-2.0 4.0 1.0]]
+           (get-in moved-external [:geometry :items 0 :coordinates])))
+    (is (= [[-2.0 3.0 1.0] [-2.0 3.0 3.0]]
+           (get-in moved-external [:geometry :items 1 :directrix])))
+    (is (= [1.0 2.0 3.0]
+           (get-in (bim/translate-geometry
+                    {:kind :extruded-area-solid :depth 2.0} [1.0 2.0 3.0])
+                   [:position :location])))
+    (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+                 (bim/translate-element wall [1.0 2.0])))))
