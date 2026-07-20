@@ -1763,3 +1763,30 @@
          #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
          #"at least two risers"
          (bim/straight-stair {:id 71 :start [0 0 0] :riser-count 1})))))
+
+(deftest path-railing-generates-continuous-rail-posts-and-ifc-geometry
+  (let [railing (bim/path-railing
+                 {:id 80 :path [[0.0 0.0 0.0] [2.0 0.0 0.0] [2.0 2.0 0.5]]
+                  :height 1.1 :post-spacing 1.0 :rail-diameter 0.05
+                  :post-diameter 0.04})
+        mesh (bim/element-mesh railing)
+        project (bim/add-element (integrated-project) 3 railing)
+        imported (integration/import-ifc-spf (ifc/write-standard-spf project))
+        imported-railing (first (filter #(= "80" (:global-id %))
+                                        (get-in imported [:sites 0 :buildings 0 :storeys 0
+                                                          :elements])))]
+    (is (= :path (get-in railing [:railing/definition :kind])))
+    (is (= 6 (get-in railing [:quantities :post-count])))
+    (is (= 7 (count (get-in railing [:geometry :items]))))
+    (is (= [0.0 0.0 1.1]
+           (first (get-in railing [:geometry :items 0 :directrix]))))
+    (is (= [2.0 2.0 1.6]
+           (last (get-in railing [:geometry :items 0 :directrix]))))
+    (is (seq (:positions mesh)))
+    (is (= :railing (:kind imported-railing)))
+    (is (= :collection (get-in imported-railing [:geometry :kind])))
+    (is (= 7 (count (get-in imported-railing [:geometry :items]))))
+    (is (thrown-with-msg?
+         #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+         #"valid path"
+         (bim/path-railing {:id 81 :path [[0 0 0]]})))))

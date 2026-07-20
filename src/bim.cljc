@@ -717,6 +717,74 @@
                           :riser-count riser-count :riser-height riser-height
                           :tread-depth tread-depth}))))
 
+(defn- polyline-length [points]
+  (reduce + (map (fn [[a b]]
+                   (sqrt (reduce + (map (fn [x y]
+                                          (let [delta (- y x)] (* delta delta)))
+                                        a b))))
+                 (partition 2 1 points))))
+
+(defn- points-at-spacing [points spacing]
+  (let [segments (mapv (fn [[a b]]
+                         (let [length (polyline-length [a b])]
+                           {:a a :b b :length length}))
+                       (partition 2 1 points))
+        total (reduce + (map :length segments))
+        distances (conj (vec (range 0.0 total spacing)) total)]
+    (mapv (fn [distance]
+            (loop [remaining segments cursor 0.0]
+              (let [{:keys [a b length]} (first remaining)]
+                (if (or (nil? (next remaining)) (<= distance (+ cursor length)))
+                  (let [ratio (if (< length 1.0e-12) 0.0 (/ (- distance cursor) length))]
+                    (mapv (fn [from to] (+ from (* ratio (- to from)))) a b))
+                  (recur (next remaining) (+ cursor length))))))
+          distances)))
+
+(defn path-railing
+  "Construct a path-based railing with a continuous top rail and evenly
+  spaced vertical posts. Path points may vary in elevation."
+  [{:keys [id name path height post-spacing rail-diameter post-diameter material]
+    :or {name "Railing" height 1.1 post-spacing 1.0 rail-diameter 0.05
+         post-diameter 0.04 material "Steel"}}]
+  (when-not (and (> (count path) 1) (every? valid-point3? path)
+                 (every? #(and (finite-number? %) (pos? %))
+                         [height post-spacing rail-diameter post-diameter]))
+    (throw (ex-info "railing requires a valid path and positive dimensions"
+                    {:path path :height height :post-spacing post-spacing
+                     :rail-diameter rail-diameter :post-diameter post-diameter})))
+  (let [path (mapv vec path) length (polyline-length path)]
+    (when (< length 1.0e-9)
+      (throw (ex-info "railing path must have nonzero length" {:path path})))
+    (let [post-bases (points-at-spacing path post-spacing)
+          elevate #(update % 2 + height)
+          top-path (mapv elevate path)
+          post-tops (mapv elevate post-bases)
+          geometry-items
+          (into [{:kind :swept-disk-solid :directrix top-path
+                  :radius (/ rail-diameter 2.0)}]
+                (map (fn [base top]
+                       {:kind :swept-disk-solid :directrix [base top]
+                        :radius (/ post-diameter 2.0)})
+                     post-bases post-tops))]
+      (assoc
+       (element
+        {:id id :kind :railing :name name :global-id (str id) :placement :identity
+         :geometry {:kind :collection :items geometry-items}
+         :material-layers [(material-layer material rail-diameter false :steel)]
+         :classification (classification-ref "Uniclass" "Ss_25_60_05" "Railing systems")
+         :quantities (quantities {:length-m length :height-m height
+                                  :post-count (count post-bases)
+                                  :post-spacing-m post-spacing})
+         :psets {"Pset_RailingCommon"
+                 (property-set "Pset_RailingCommon"
+                               {:Height (real-value height)
+                                :IsExternal (bool-value false)})}
+         :openings [] :connected-to []})
+       :railing/definition {:kind :path :path path :height height
+                            :post-spacing post-spacing :rail-diameter rail-diameter
+                            :post-diameter post-diameter
+                            :post-points post-bases}))))
+
 (defn- point3 [point]
   (let [[x y & [z]] (or point [0.0 0.0 0.0])]
     [(or x 0.0) (or y 0.0) (or z 0.0)]))
