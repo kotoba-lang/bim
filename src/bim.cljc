@@ -246,83 +246,121 @@
                    #(update % :elements
                             (fn [elements] (vec (remove (fn [e] (= element-id (:id e))) elements))))))
 
-(defn- translate-point [point delta]
-  (when point (mapv + point (take (count point) delta))))
+(defn- map-point [point point-fn]
+  (when point (vec (point-fn point))))
 
-(defn- translate-placement [placement delta]
-  (cond
-    (= :identity placement) {:location (vec delta)}
-    (nil? placement) {:location (vec delta)}
-    (map? placement) (update placement :location
-                             #(translate-point (or % [0.0 0.0 0.0]) delta))
-    :else placement))
+(defn- map-placement [placement point-fn vector-fn]
+  (if (or (nil? placement) (= :identity placement) (map? placement))
+    (let [placement (if (map? placement) placement {})]
+      (cond-> (assoc placement :location
+                     (map-point (or (:location placement) [0.0 0.0 0.0]) point-fn))
+        (:axis placement) (update :axis #(map-point % vector-fn))
+        (:ref-direction placement) (update :ref-direction #(map-point % vector-fn))))
+    placement))
 
-(declare translate-geometry)
+(declare map-geometry)
 
-(defn- translate-curve [curve delta]
+(defn- map-curve [curve point-fn vector-fn]
   (case (:kind curve)
-    :polyline (update curve :points #(mapv (fn [p] (translate-point p delta)) %))
-    :indexed-polycurve (update curve :points #(mapv (fn [p] (translate-point p delta)) %))
+    :polyline (update curve :points #(mapv (fn [p] (map-point p point-fn)) %))
+    :indexed-polycurve (update curve :points #(mapv (fn [p] (map-point p point-fn)) %))
     :composite-curve (update curve :segments
                              #(mapv (fn [segment]
-                                      (update segment :parent-curve translate-curve delta)) %))
-    :line (update curve :origin translate-point delta)
-    (:circle :ellipse) (update curve :position translate-placement delta)
+                                      (update segment :parent-curve map-curve point-fn vector-fn)) %))
+    :line (-> curve (update :origin map-point point-fn)
+              (update :direction map-point vector-fn))
+    (:circle :ellipse) (update curve :position map-placement point-fn vector-fn)
     :b-spline-curve (update curve :control-points
-                            #(mapv (fn [p] (translate-point p delta)) %))
+                            #(mapv (fn [p] (map-point p point-fn)) %))
     curve))
 
-(defn- translate-bound [bound delta]
+(defn- map-bound [bound point-fn vector-fn]
   (cond-> bound
     (seq (:points bound))
-    (update :points #(mapv (fn [p] (translate-point p delta)) %))
+    (update :points #(mapv (fn [p] (map-point p point-fn)) %))
     (seq (:edges bound))
     (update :edges
             #(mapv (fn [edge]
                      (-> edge
-                         (update :start translate-point delta)
-                         (update :end translate-point delta)
-                         (update :curve translate-curve delta))) %))))
+                         (update :start map-point point-fn)
+                         (update :end map-point point-fn)
+                         (update :curve map-curve point-fn vector-fn))) %))))
 
-(defn- translate-face [face delta]
-  (cond-> (update face :bounds #(mapv (fn [bound] (translate-bound bound delta)) %))
-    (get-in face [:surface :position])
-    (update-in [:surface :position] translate-placement delta)
-    (= :b-spline-surface (get-in face [:surface :kind]))
-    (update-in [:surface :control-points]
-               #(mapv (fn [row] (mapv (fn [p] (translate-point p delta)) row)) %))))
+(defn- map-surface [surface point-fn vector-fn]
+  (cond-> surface
+    (:position surface) (update :position map-placement point-fn vector-fn)
+    (= :b-spline-surface (:kind surface))
+    (update :control-points
+            #(mapv (fn [row] (mapv (fn [p] (map-point p point-fn)) row)) %))))
+
+(defn- map-face [face point-fn vector-fn]
+  (cond-> (update face :bounds #(mapv (fn [bound] (map-bound bound point-fn vector-fn)) %))
+    (:surface face)
+    (update :surface map-surface point-fn vector-fn)))
+
+(defn- map-geometry [geometry point-fn vector-fn]
+  (case (:kind geometry)
+    :axis-sweep (update geometry :axis #(mapv (fn [p] (map-point p point-fn)) %))
+    :slab-extrusion (update geometry :boundary #(mapv (fn [p] (map-point p point-fn)) %))
+    (:extruded-area-solid :revolved-area-solid
+     :fixed-reference-swept-area-solid :surface-curve-swept-area-solid)
+    (cond-> (update geometry :position map-placement point-fn vector-fn)
+      (:direction geometry) (update :direction map-point vector-fn)
+      (:axis geometry) (update :axis map-placement point-fn vector-fn)
+      (:directrix geometry) (update :directrix map-curve point-fn vector-fn)
+      (:fixed-reference geometry) (update :fixed-reference map-point vector-fn)
+      (:reference-surface geometry) (update :reference-surface map-surface point-fn vector-fn))
+    :swept-disk-solid (update geometry :directrix
+                              #(mapv (fn [p] (map-point p point-fn)) %))
+    :mapped-item
+    (-> geometry
+        (update-in [:transform :origin]
+                   #(map-point (or % [0.0 0.0 0.0]) point-fn))
+        (cond-> (get-in geometry [:transform :axis1])
+          (update-in [:transform :axis1] map-point vector-fn))
+        (cond-> (get-in geometry [:transform :axis2])
+          (update-in [:transform :axis2] map-point vector-fn))
+        (cond-> (get-in geometry [:transform :axis3])
+          (update-in [:transform :axis3] map-point vector-fn)))
+    (:faceted-brep :advanced-brep)
+    (update geometry :faces #(mapv (fn [face] (map-face face point-fn vector-fn)) %))
+    (:triangulated-face-set :polygonal-face-set)
+    (update geometry :coordinates #(mapv (fn [p] (map-point p point-fn)) %))
+    :collection (update geometry :items #(mapv (fn [item] (map-geometry item point-fn vector-fn)) %))
+    :boolean-result (-> geometry
+                        (update :first-operand map-geometry point-fn vector-fn)
+                        (update :second-operand map-geometry point-fn vector-fn))
+    :half-space-solid
+    (cond-> geometry
+      (get-in geometry [:base-surface :position])
+      (update :base-surface map-surface point-fn vector-fn)
+      (:position geometry) (update :position map-placement point-fn vector-fn)
+      (get-in geometry [:boundary :points])
+      (update-in [:boundary :points]
+                 #(mapv (fn [p] (map-point p point-fn)) %)))
+    geometry))
 
 (defn translate-geometry
   "Translate renderable BIM/IFC geometry by a world-space `[dx dy dz]` delta."
   [geometry delta]
-  (case (:kind geometry)
-    :axis-sweep (update geometry :axis #(mapv (fn [p] (translate-point p delta)) %))
-    :slab-extrusion (update geometry :boundary #(mapv (fn [p] (translate-point p delta)) %))
-    (:extruded-area-solid :revolved-area-solid
-     :fixed-reference-swept-area-solid :surface-curve-swept-area-solid)
-    (cond-> (update geometry :position translate-placement delta)
-      (:directrix geometry) (update :directrix translate-curve delta))
-    :swept-disk-solid (update geometry :directrix
-                              #(mapv (fn [p] (translate-point p delta)) %))
-    :mapped-item (update-in geometry [:transform :origin]
-                            #(translate-point (or % [0.0 0.0 0.0]) delta))
-    (:faceted-brep :advanced-brep)
-    (update geometry :faces #(mapv (fn [face] (translate-face face delta)) %))
-    (:triangulated-face-set :polygonal-face-set)
-    (update geometry :coordinates #(mapv (fn [p] (translate-point p delta)) %))
-    :collection (update geometry :items #(mapv (fn [item] (translate-geometry item delta)) %))
-    :boolean-result (-> geometry
-                        (update :first-operand translate-geometry delta)
-                        (update :second-operand translate-geometry delta))
-    :half-space-solid
-    (cond-> geometry
-      (get-in geometry [:base-surface :position])
-      (update-in [:base-surface :position] translate-placement delta)
-      (:position geometry) (update :position translate-placement delta)
-      (get-in geometry [:boundary :points])
-      (update-in [:boundary :points]
-                 #(mapv (fn [p] (translate-point p delta)) %)))
-    geometry))
+  (map-geometry geometry #(mapv + % (take (count %) delta)) identity))
+
+(defn- map-element [element point-fn vector-fn]
+  (cond-> (-> element
+              (update :placement map-placement point-fn vector-fn)
+              (update :geometry map-geometry point-fn vector-fn))
+    (seq (:mep/connectors element))
+    (update :mep/connectors
+            #(mapv (fn [connector]
+                     (cond-> connector
+                       (:connector/point connector)
+                       (update :connector/point map-point point-fn)
+                       (:connector/direction connector)
+                       (update :connector/direction map-point vector-fn))) %))
+    (seq (:ports element))
+    (update :ports
+            #(mapv (fn [port]
+                     (update port :placement map-placement point-fn vector-fn)) %))))
 
 (defn translate-element
   "Move an element without changing its identity, type, quantities, or links."
@@ -332,9 +370,59 @@
                                #?(:clj (Double/isFinite (double %))
                                   :cljs (js/Number.isFinite %))) delta))
     (throw (ex-info "element translation must be a numeric 3D delta" {:delta delta})))
-  (-> element
-      (update :placement translate-placement delta)
-      (update :geometry translate-geometry (vec delta))))
+  (map-element element #(mapv + % (take (count %) delta)) identity))
+
+(defn- finite-number? [value]
+  (and (number? value)
+       #?(:clj (Double/isFinite (double value)) :cljs (js/Number.isFinite value))))
+
+(defn- valid-point3? [point]
+  (and (= 3 (count point)) (every? finite-number? point)))
+
+(defn- rotate-z-point [point pivot angle]
+  (let [[x y & [z]] point [px py pz] pivot
+        cosine (#?(:clj Math/cos :cljs js/Math.cos) angle)
+        sine (#?(:clj Math/sin :cljs js/Math.sin) angle)
+        dx (- x px) dy (- y py)
+        result [(+ px (- (* dx cosine) (* dy sine)))
+                (+ py (* dx sine) (* dy cosine))
+                (+ pz (- (or z pz) pz))]]
+    (subvec result 0 (count point))))
+
+(defn rotate-element-z
+  "Rotate an element around a world-space Z axis through `pivot`, in radians."
+  [element pivot angle]
+  (when-not (and (valid-point3? pivot) (finite-number? angle))
+    (throw (ex-info "element rotation requires a 3D pivot and finite angle"
+                    {:pivot pivot :angle angle})))
+  (map-element element
+               #(rotate-z-point % pivot angle)
+               #(rotate-z-point % [0.0 0.0 0.0] angle)))
+
+(defn- dot3 [left right] (reduce + (map * left right)))
+
+(defn- reflect-vector [vector unit-normal]
+  (mapv - vector (mapv #(* 2.0 (dot3 vector unit-normal) %) unit-normal)))
+
+(defn- reflect-point [point origin unit-normal]
+  (let [dimension (count point)
+        point3 (vec (concat point (repeat (- 3 dimension) 0.0)))
+        delta (mapv - point3 origin)
+        reflected (mapv + origin (reflect-vector delta unit-normal))]
+    (subvec reflected 0 dimension)))
+
+(defn mirror-element
+  "Mirror an element across a world-space plane defined by origin and normal."
+  [element origin normal]
+  (when-not (and (valid-point3? origin) (valid-point3? normal)
+                 (pos? (dot3 normal normal)))
+    (throw (ex-info "element mirror requires a 3D plane with non-zero normal"
+                    {:origin origin :normal normal})))
+  (let [magnitude (sqrt (dot3 normal normal))
+        unit-normal (mapv #(/ % magnitude) normal)]
+    (map-element element
+                 #(reflect-point % origin unit-normal)
+                 #(reflect-vector % unit-normal))))
 
 (defn duplicate-element
   "Create an independent translated copy. Root/opening identities are renewed
@@ -357,6 +445,28 @@
          (update :mep/connectors
                  (fn [connectors]
                    (mapv #(assoc % :connector/connected-to nil) connectors)))))))
+
+(defn linear-array
+  "Create translated copies for ordered `{:id :global-id}` identities.
+  `step` is the world-space displacement between adjacent instances."
+  [element identities step]
+  (when-not (valid-point3? step)
+    (throw (ex-info "linear array requires a finite 3D step" {:step step})))
+  (mapv (fn [index {:keys [id global-id]}]
+          (duplicate-element element id (or global-id (str id))
+                             (mapv #(* (inc index) %) step)))
+        (range) identities))
+
+(defn radial-array
+  "Create rotated copies for ordered identities around a world-space Z axis."
+  [element identities pivot angle-step]
+  (when-not (and (valid-point3? pivot) (finite-number? angle-step))
+    (throw (ex-info "radial array requires a 3D pivot and finite angle step"
+                    {:pivot pivot :angle-step angle-step})))
+  (mapv (fn [index {:keys [id global-id]}]
+          (-> (duplicate-element element id (or global-id (str id)) [0.0 0.0 0.0])
+              (rotate-element-z pivot (* (inc index) angle-step))))
+        (range) identities))
 
 (declare polygon-area)
 
