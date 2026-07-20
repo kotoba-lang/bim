@@ -999,13 +999,18 @@
                             [(+ x0 px) (+ y0 py)]]}
          :position {:location [0.0 0.0 z0]} :direction [0.0 0.0 1.0] :depth height})
       :slab-extrusion
-      (let [boundary (:boundary geometry) z (nth (first boundary) 2 0.0)]
-        {:kind :extruded-area-solid
-         :profile {:kind :arbitrary-closed :name "Slab footprint"
-                   :points (mapv (fn [[x y _]] [x y])
-                                 (conj (vec boundary) (first boundary)))}
-         :position {:location [0.0 0.0 z]} :direction [0.0 0.0 1.0]
-         :depth (:thickness geometry)})
+      (if (:slab/shape-edited? element)
+        (let [mesh (bim/element-mesh element)]
+          {:kind :triangulated-face-set :coordinates (:positions mesh)
+           :coord-indices (mapv #(mapv inc %) (partition 3 (:indices mesh)))
+           :closed true})
+        (let [boundary (:boundary geometry) z (nth (first boundary) 2 0.0)]
+          {:kind :extruded-area-solid
+           :profile {:kind :arbitrary-closed :name "Slab footprint"
+                     :points (mapv (fn [[x y _]] [x y])
+                                   (conj (vec boundary) (first boundary)))}
+           :position {:location [0.0 0.0 z]} :direction [0.0 0.0 1.0]
+           :depth (:thickness geometry)}))
       geometry)))
 
 (defn- exported-property [value]

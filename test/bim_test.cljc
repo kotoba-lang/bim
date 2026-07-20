@@ -1892,3 +1892,44 @@
          #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
          #"identities"
          (bim/rooms-from-walls walls [{:id 201}] {:height 3.0})))))
+
+(deftest slab-boundary-shape-editing-updates-surface-and-ifc-tessellation
+  (let [floor (-> (bim/slab {:id 300 :boundary [[0.0 0.0 0.0] [6.0 0.0 0.0]
+                                                        [6.0 4.0 0.0] [0.0 4.0 0.0]]
+                              :thickness 0.2})
+                  (bim/set-slab-vertex-elevations [0.0 0.2 0.6 0.1]))
+        mesh (bim/element-mesh floor)
+        project (bim/add-element (integrated-project) 3 floor)
+        text (ifc/write-standard-spf project)
+        imported (integration/import-ifc-spf text)
+        imported-floor (first (filter #(= "300" (:global-id %))
+                                      (get-in imported [:sites 0 :buildings 0 :storeys 0
+                                                        :elements])))
+        imported-mesh (bim/element-mesh imported-floor)]
+    (is (true? (:slab/shape-edited? floor)))
+    (is (= [0.0 0.2 0.6 0.1]
+           (mapv #(nth % 2) (get-in floor [:geometry :boundary]))))
+    (is (> (get-in floor [:quantities :gross-area-m2]) 24.0))
+    (is (= 24.0 (get-in floor [:quantities :projected-area-m2])))
+    (is (< (#?(:clj Math/abs :cljs js/Math.abs)
+            (- 4.8 (get-in floor [:quantities :net-volume-m3]))) 1.0e-12))
+    (is (seq (:indices mesh)))
+    (is (string/includes? text "IFCTRIANGULATEDFACESET"))
+    (is (= :triangulated-face-set (get-in imported-floor [:geometry :kind])))
+    (is (= [(reduce min (map #(nth % 2) (:positions mesh)))
+            (reduce max (map #(nth % 2) (:positions mesh)))]
+           [(reduce min (map #(nth % 2) (:positions imported-mesh)))
+            (reduce max (map #(nth % 2) (:positions imported-mesh)))])
+        "IFC tessellation preserves edited slab elevations and thickness")
+    (is (thrown-with-msg?
+         #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+         #"match boundary"
+         (bim/set-slab-vertex-elevations floor [0.0 0.1])))
+    (is (thrown-with-msg?
+         #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+         #"remove slab openings"
+         (bim/set-slab-vertex-elevations
+          (bim/add-opening-to-slab
+           (bim/slab {:id 301 :boundary [[0 0 0] [4 0 0] [4 4 0] [0 4 0]]})
+           (bim/slab-opening {:id 302 :boundary [[1 1 0] [2 1 0] [2 2 0] [1 2 0]]}))
+          [0.0 0.1 0.2 0.0])))))
