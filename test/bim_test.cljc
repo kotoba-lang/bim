@@ -762,13 +762,13 @@
     (is (= "Tower" (:name project)))
     (is (= "Ground" (:name storey)))
     (is (= "wall-guid" (:global-id wall)))
-    (is (= [[10 20 0] [18.0 20 0]] (get-in wall [:geometry :axis])))
+    (is (= [[10 20 0] [18.0 20.0 0.0]] (get-in wall [:geometry :axis])))
     (is (= 0.25 (get-in wall [:geometry :profile :thickness])))
     (is (= 3.2 (get-in wall [:geometry :profile :height])))
     (is (= :metre (get-in project [:units :length])))
     (is (true? (get-in wall [:psets "Pset_WallCommon" :props :IsExternal :value])))
     (is (= "2 HR" (get-in wall [:psets "Pset_WallCommon" :props :FireRating :value])))
-    (is (= {:offset 2 :sill 0} (get-in wall [:openings 0 :placement])))
+    (is (= {:offset 2.0 :sill 0.0} (get-in wall [:openings 0 :placement])))
     (is (= 120 (get-in wall [:openings 0 :filled-by])))
     (is (= :other (:kind mapped)))
     (is (= :proxy (:ifc/kind mapped)))
@@ -784,6 +784,46 @@
     (is (= 12 (count (:positions brep-mesh))))
     (is (= 12 (count (:indices brep-mesh))))
     (is (= [0.0 0.0 -1.0] (first (:normals brep-mesh))))))
+
+(deftest imports-rotated-ifc-products-in-their-composed-coordinate-system
+  (let [document {:ifc/schema "IFC4X3_ADD2"
+                  :ifc/project {:id 1 :name "Rotated Tower" :type :ifcproject
+                                :children [{:id 2 :name "Site" :type :ifcsite
+                                            :children [{:id 3 :name "Building" :type :ifcbuilding
+                                                        :children [{:id 4 :name "Ground"
+                                                                    :type :ifcbuildingstorey
+                                                                    :children []}]}]}]}
+                  :ifc/elements
+                  [{:id 100 :global-id "rotated-wall" :name "Rotated Wall"
+                    :kind :wall :container-id 4
+                    :placement {:location [10.0 2.0 0.0]
+                                :axis [0.0 0.0 1.0]
+                                :ref-direction [0.0 1.0 0.0]}
+                    :geometry {:kind :extruded-area-solid
+                               :profile {:kind :rectangle :x-dim 8.0 :y-dim 0.25}
+                               :depth 3.2}
+                    :openings [{:id 110 :kind :opening
+                                :placement {:location [10.0 4.0 0.8]}
+                                :geometry {:kind :extruded-area-solid
+                                           :profile {:kind :rectangle :x-dim 0.9 :y-dim 0.25}
+                                           :depth 2.1}}]}
+                   {:id 200 :global-id "rotated-slab" :name "Rotated Slab"
+                    :kind :slab :container-id 4
+                    :placement {:location [20.0 5.0 0.0]
+                                :axis [0.0 0.0 1.0]
+                                :ref-direction [0.0 1.0 0.0]}
+                    :geometry {:kind :extruded-area-solid
+                               :profile {:kind :rectangle :x-dim 6.0 :y-dim 4.0}
+                               :depth 0.25}}]}
+        project (integration/import-external-ifc document)
+        elements (:elements (bim/find-storey project 4))
+        wall (first (filter #(= 100 (:id %)) elements))
+        slab (first (filter #(= 200 (:id %)) elements))]
+    (is (= [[10.0 2.0 0.0] [10.0 10.0 0.0]] (get-in wall [:geometry :axis])))
+    (is (= {:offset 2.0 :sill 0.8} (get-in wall [:openings 0 :placement])))
+    (is (= [[20.0 5.0 0.0] [20.0 11.0 0.0]
+            [16.0 11.0 0.0] [16.0 5.0 0.0]]
+           (get-in slab [:geometry :boundary])))))
 
 (deftest meshes-spherical-and-toroidal-advanced-faces
   (let [sphere (bim/element-mesh
