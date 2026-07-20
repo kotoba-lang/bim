@@ -126,6 +126,33 @@
     (is (= 24 (count (:indices mesh))))
     (is (= 32.0 area))))
 
+(deftest planar-advanced-brep-projection
+  (let [element (bim/element
+                 {:id 65 :kind :other :name "Advanced planar face"
+                  :geometry {:kind :advanced-brep
+                             :faces [{:same-sense true
+                                      :surface {:kind :plane
+                                                :position {:location [0 0 0]
+                                                           :axis [0 0 1]}}
+                                      :bounds [{:kind :outer :orientation true
+                                                :points [[0 0 0] [4 0 0] [4 3 0] [0 3 0]]}
+                                               {:kind :inner :orientation true
+                                                :points [[1 1 0] [1 2 0] [3 2 0] [3 1 0]]}]}
+                                     {:same-sense true
+                                      :surface {:kind :cylinder :radius 2.0
+                                                :position {:location [0 0 0] :axis [0 0 1]}}
+                                      :bounds []}]}})
+        mesh (bim/element-mesh element)]
+    (is (= 24 (count (:indices mesh))))
+    (is (= 10.0
+           (reduce +
+                   (map (fn [[ia ib ic]]
+                          (let [[[ax ay] [bx by] [cx cy]]
+                                (map (fn [i] (take 2 (nth (:positions mesh) i))) [ia ib ic])]
+                            (/ (#?(:clj Math/abs :cljs js/Math.abs)
+                                (- (* (- bx ax) (- cy ay)) (* (- by ay) (- cx ax)))) 2.0)))
+                        (partition 3 (:indices mesh))))))))
+
 (deftest circular-and-swept-disk-mesh-projection
   (let [column (bim/element {:id 61 :kind :column :name "Round"
                              :geometry {:kind :extruded-area-solid

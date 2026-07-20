@@ -421,6 +421,20 @@
               (:faces geometry))]
     (when (seq face-meshes) (merge-meshes face-meshes))))
 
+(defn- advanced-brep-mesh [geometry]
+  (let [face-meshes
+        (keep (fn [face]
+                (when (= :plane (get-in face [:surface :kind]))
+                  (let [ordered (sort-by #(if (= :outer (:kind %)) 0 1) (:bounds face))
+                        rings (mapv (fn [bound]
+                                      (cond-> (vec (:points bound))
+                                        (false? (:orientation bound)) reverse
+                                        (false? (:same-sense face)) reverse))
+                                    ordered)]
+                    (planar-rings-mesh rings))))
+              (:faces geometry))]
+    (when (seq face-meshes) (merge-meshes face-meshes))))
+
 (defn- indexed-face-mesh [coordinates indices]
   (let [points (mapv #(nth coordinates (dec %)) indices)]
     (when (>= (count points) 3)
@@ -537,6 +551,7 @@
     :extruded-area-solid (extruded-area-mesh geometry)
     :mapped-item (mapped-item-mesh geometry)
     :faceted-brep (faceted-brep-mesh geometry)
+    :advanced-brep (advanced-brep-mesh geometry)
     (:triangulated-face-set :polygonal-face-set) (tessellated-mesh geometry)
     :swept-disk-solid (swept-disk-mesh geometry)
     :collection (let [meshes (keep geometry-mesh (:items geometry))]
