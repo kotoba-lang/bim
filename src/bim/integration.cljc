@@ -17,11 +17,11 @@
 
 (defn family-definition
   [{:keys [id name category parameters formulas reference-planes sketches constraints
-           host types template]}]
+           adaptive host types template]}]
   {:family/id id :family/name name :family/category category
    :family/parameters (or parameters {}) :family/formulas (or formulas {})
    :family/reference-planes (or reference-planes {})
-   :family/sketches (or sketches {}) :family/host host
+   :family/sketches (or sketches {}) :family/adaptive adaptive :family/host host
    :family/constraints (vec constraints) :family/types (or types {})
    :family/template template :family/schema-version schema-version})
 
@@ -224,17 +224,43 @@
                    (throw (ex-info "family sketch must be a closed loop of unique named points"
                                    {:sketch sketch-name :loop loop-names})))
                  (doseq [constraint (:constraints sketch)]
-                   (let [[a b] (map points [(:from constraint) (:to constraint)])
-                         tolerance (or (:tolerance constraint) 1.0e-9)]
+                   (let [point #(get points %)
+                         vector-between (fn [[from to]]
+                                          (mapv - (point to) (point from)))
+                         length (fn [segment]
+                                  (sqrt (reduce + (map #(* % %) (vector-between segment)))))
+                         [a b] (map point [(:from constraint) (:to constraint)])
+                         tolerance (or (:tolerance constraint) 1.0e-9)
+                         failed! #(throw (ex-info % {:sketch sketch-name
+                                                     :constraint constraint}))]
                      (case (:kind constraint)
                        :horizontal
                        (when (> (math-abs (- (second a) (second b))) tolerance)
-                         (throw (ex-info "family sketch horizontal constraint failed"
-                                         {:sketch sketch-name :constraint constraint})))
+                         (failed! "family sketch horizontal constraint failed"))
                        :vertical
                        (when (> (math-abs (- (first a) (first b))) tolerance)
-                         (throw (ex-info "family sketch vertical constraint failed"
-                                         {:sketch sketch-name :constraint constraint})))
+                         (failed! "family sketch vertical constraint failed"))
+                       :coincident
+                       (when (> (length [(:from constraint) (:to constraint)]) tolerance)
+                         (failed! "family sketch coincident constraint failed"))
+                       :distance
+                       (let [actual (length [(:from constraint) (:to constraint)])
+                             expected (eval-layout-expression params planes (:value constraint))]
+                         (when (> (math-abs (- actual expected)) tolerance)
+                           (failed! "family sketch distance constraint failed")))
+                       :equal-length
+                       (when (> (math-abs (- (length (:first constraint))
+                                             (length (:second constraint)))) tolerance)
+                         (failed! "family sketch equal-length constraint failed"))
+                       (:parallel :perpendicular)
+                       (let [[ax ay] (vector-between (:first constraint))
+                             [bx by] (vector-between (:second constraint))
+                             cross (- (* ax by) (* ay bx))
+                             dot (+ (* ax bx) (* ay by))
+                             residual (if (= :parallel (:kind constraint)) cross dot)]
+                         (when (> (math-abs residual) tolerance)
+                           (failed! (str "family sketch " (name (:kind constraint))
+                                         " constraint failed"))))
                        (throw (ex-info "unsupported family sketch constraint"
                                        {:sketch sketch-name :constraint constraint})))))
                  [sketch-name
@@ -342,6 +368,37 @@
   (let [family (get-in catalog [:family-catalog/families family-id])]
     (when-not family (throw (ex-info "family not found" {:family-id family-id})))
     (instantiate-family* catalog family type-key instance-id overrides #{family-id})))
+
+(defn instantiate-adaptive-family
+  "Drive an adaptive family template from ordered 3D placement points. Markers
+  `[:adaptive-point n]` and `[:adaptive-path]` are materialized recursively."
+  [family instance-id overrides placement-points]
+  (let [{:keys [min-points max-points closed?]} (:family/adaptive family)
+        points (mapv vec placement-points)
+        count-points (count points)]
+    (when-not (:family/adaptive family)
+      (throw (ex-info "family is not adaptive" {:family-id (:family/id family)})))
+    (when (or (< count-points (or min-points 2))
+              (and max-points (> count-points max-points))
+              (some #(or (not= 3 (count %)) (not-every? number? %)) points))
+      (throw (ex-info "adaptive family placement points are invalid"
+                      {:family-id (:family/id family) :point-count count-points
+                       :min-points min-points :max-points max-points})))
+    (when (some #(= (first %) (second %)) (partition 2 1 points))
+      (throw (ex-info "adaptive family has coincident consecutive points"
+                      {:family-id (:family/id family)})))
+    (let [path (cond-> points closed? (conj (first points)))
+          instance (instantiate-family family instance-id overrides)]
+      (-> (walk/postwalk (fn [value]
+                           (cond
+                             (and (vector? value) (= :adaptive-point (first value)))
+                             (or (get points (second value))
+                                 (throw (ex-info "adaptive point index is out of range"
+                                                 {:index (second value) :count count-points})))
+                             (and (vector? value) (= [:adaptive-path] value)) path
+                             :else value))
+                         instance)
+          (assoc :family/adaptive-points points :family/adaptive-path path)))))
 
 (defn place-hosted-family
   "Instantiate and attach a hosted family to an allowed host category and face."
