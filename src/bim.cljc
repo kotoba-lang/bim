@@ -570,15 +570,103 @@
               :psets {"Pset_SlabCommon" (property-set "Pset_SlabCommon" {:IsExternal (bool-value false)})}
               :openings [] :connected-to []})))
 
-(defn slab-mesh [{:keys [geometry]}]
-  (let [boundary (:boundary geometry) thickness (:thickness geometry) n (count boundary)
-        top (mapv (fn [[x y z]] [x y (+ z thickness)]) boundary)
-        positions (into (vec boundary) top)
-        bottom-tris (mapcat (fn [i] [0 (inc i) i]) (range 1 (dec n)))
-        top-tris (mapcat (fn [i] [n (+ n i) (+ n (inc i))]) (range 1 (dec n)))
-        sides (mapcat (fn [i] (let [j (mod (inc i) n)] [i j (+ n i), j (+ n j) (+ n i)])) (range n))
-        indices (vec (concat bottom-tris top-tris sides))]
-    {:positions positions :indices indices :normals (vec (repeat (* 2 n) [0 0 1]))}))
+(defn set-slab-layers
+  "Apply an ordered floor/ceiling build-up and derive layer quantities."
+  [slab-element layers]
+  (when-not (= :slab (:kind slab-element))
+    (throw (ex-info "compound layers require a slab" {:element-id (:id slab-element)})))
+  (when-not (seq layers)
+    (throw (ex-info "compound slab requires at least one material layer" {})))
+  (doseq [layer layers]
+    (when-not (and (some? (:material layer)) (finite-number? (:thickness layer))
+                   (pos? (:thickness layer))
+                   (contains? material-categories (:category layer)))
+      (throw (ex-info "invalid compound slab layer" {:layer layer}))))
+  (let [thickness (reduce + (map :thickness layers))
+        gross-area (polygon-area (get-in slab-element [:geometry :boundary]))
+        opening-area (reduce + 0.0 (map #(polygon-area (:boundary %))
+                                       (:openings slab-element)))
+        net-area (- gross-area opening-area)
+        layers (mapv #(assoc % :gross-volume-m3 (* gross-area (:thickness %))
+                               :net-volume-m3 (* net-area (:thickness %))) layers)]
+    (-> slab-element
+        (assoc :material-layers layers)
+        (assoc-in [:geometry :thickness] thickness)
+        (assoc :quantities
+               (merge (:quantities slab-element)
+                      {:gross-area-m2 gross-area :net-area-m2 net-area
+                       :gross-volume-m3 (* gross-area thickness)
+                       :net-volume-m3 (* net-area thickness)})))))
+
+(defn compound-slab [{:keys [layers] :as options}]
+  (set-slab-layers (slab (dissoc options :layers)) layers))
+
+(defn slab-opening
+  [{:keys [id boundary]}]
+  (when-not (and (>= (count boundary) 3) (every? valid-point3? boundary)
+                 (pos? (polygon-area boundary)))
+    (throw (ex-info "slab opening requires a valid planar boundary"
+                    {:id id :boundary boundary})))
+  {:id id :kind :opening :name "Shaft opening" :global-id (str id)
+   :boundary (mapv vec boundary) :filled-by nil})
+
+(defn- point-in-ring-xy? [[x y] ring]
+  (odd?
+   (count
+    (filter true?
+            (map (fn [[[x1 y1] [x2 y2]]]
+                   (and (not= (> y1 y) (> y2 y))
+                        (< x (+ x1 (* (- x2 x1) (/ (- y y1) (- y2 y1)))))))
+                 (partition 2 1 (conj (vec ring) (first ring))))))))
+
+(defn add-opening-to-slab [slab-element opening]
+  (when-not (= :slab (:kind slab-element))
+    (throw (ex-info "shaft opening requires a slab" {:element-id (:id slab-element)})))
+  (let [outer (get-in slab-element [:geometry :boundary])
+        boundary (:boundary opening)
+        base-z (nth (first outer) 2)]
+    (when-not (and (every? #(point-in-ring-xy? % outer) boundary)
+                   (every? #(< (#?(:clj Math/abs :cljs js/Math.abs)
+                                  (- (nth % 2) base-z)) 1.0e-8) boundary))
+      (throw (ex-info "slab opening must lie inside the slab plane"
+                      {:slab-id (:id slab-element) :opening-id (:id opening)})))
+    (let [updated (update slab-element :openings conj opening)]
+      (set-slab-layers updated (:material-layers updated)))))
+
+(defn remove-opening-from-slab [slab-element opening-id]
+  (let [updated (update slab-element :openings
+                        #(vec (remove (fn [opening] (= opening-id (:id opening))) %)))]
+    (set-slab-layers updated (:material-layers updated))))
+
+(declare planar-rings-mesh merge-meshes)
+(defn- ring-side-mesh [ring thickness inward?]
+  (let [n (count ring) top (mapv #(update % 2 + thickness) ring)
+        positions (into (vec ring) top)
+        triangles (mapcat (fn [i]
+                            (let [j (mod (inc i) n) face [i j (+ n j) i (+ n j) (+ n i)]]
+                              (if inward? (mapcat reverse (partition 3 face)) face)))
+                          (range n))]
+    {:positions positions :indices (vec triangles)
+     :normals (vec (repeat (* 2 n) [0.0 0.0 1.0]))}))
+
+(defn slab-mesh [{:keys [geometry openings]}]
+  (let [boundary (:boundary geometry) thickness (:thickness geometry)]
+    (if (empty? openings)
+      (let [n (count boundary) top (mapv (fn [[x y z]] [x y (+ z thickness)]) boundary)
+            positions (into (vec boundary) top)
+            bottom-tris (mapcat (fn [i] [0 (inc i) i]) (range 1 (dec n)))
+            top-tris (mapcat (fn [i] [n (+ n i) (+ n (inc i))]) (range 1 (dec n)))
+            sides (mapcat (fn [i] (let [j (mod (inc i) n)] [i j (+ n i), j (+ n j) (+ n i)])) (range n))]
+        {:positions positions :indices (vec (concat bottom-tris top-tris sides))
+         :normals (vec (repeat (* 2 n) [0 0 1]))})
+      (let [hole-rings (mapv :boundary openings)
+            top-rings (mapv (fn [ring] (mapv #(update % 2 + thickness) ring))
+                            (into [boundary] hole-rings))
+            bottom-rings (mapv #(vec (reverse %)) (into [boundary] hole-rings))]
+        (merge-meshes
+         (concat [(planar-rings-mesh top-rings) (planar-rings-mesh bottom-rings)
+                  (ring-side-mesh boundary thickness false)]
+                 (map #(ring-side-mesh % thickness true) hole-rings)))))))
 
 (defn- midpoint3 [a b]
   (mapv #(/ (+ %1 %2) 2.0) a b))
