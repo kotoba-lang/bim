@@ -235,6 +235,37 @@
                    #(update % :elements
                             (fn [elements] (vec (remove (fn [e] (= element-id (:id e))) elements))))))
 
+(declare polygon-area)
+
+(defn room-space
+  [{:keys [id name label category boundary height]
+    :or {name "Room" category :other height 3.0}}]
+  (when (< (count boundary) 3)
+    (throw (ex-info "room boundary needs at least three points" {:id id})))
+  (let [area (polygon-area boundary)]
+    (space {:id id :name name :long-name name :label label :category category
+            :boundary (vec boundary) :height height
+            :quantities (quantities {:gross-area-m2 area :net-area-m2 area
+                                     :gross-volume-m3 (* area height)
+                                     :net-volume-m3 (* area height)})})))
+
+(defn add-space [proj storey-id new-space]
+  (when-not (find-storey proj storey-id)
+    (throw (ex-info "storey not found" {:storey-id storey-id})))
+  (update-storey* proj storey-id #(update % :spaces conj new-space)))
+
+(defn update-space [proj storey-id space-id f & args]
+  (update-storey* proj storey-id
+                   #(update % :spaces
+                            (fn [spaces]
+                              (mapv (fn [s] (if (= space-id (:id s))
+                                              (apply f s args) s)) spaces)))))
+
+(defn delete-space [proj storey-id space-id]
+  (update-storey* proj storey-id
+                   #(update % :spaces
+                            (fn [spaces] (vec (remove (fn [s] (= space-id (:id s))) spaces))))))
+
 (defn wall
   [{:keys [id name start end thickness height material]
     :or {name "Wall" thickness 0.2 height 3.0 material "Concrete"}}]
@@ -352,3 +383,31 @@
         (recur (next remaining) (into positions (:positions m)) (into normals (:normals m))
                (into indices (map #(+ offset %) (:indices m)))))
       {:positions (vec positions) :normals (vec normals) :indices (vec indices)})))
+
+(defn- mesh-bounds [element]
+  (when-let [positions (:positions (element-mesh element))]
+    (when (seq positions)
+      {:min (mapv #(reduce min (map % positions)) [first second #(nth % 2)])
+       :max (mapv #(reduce max (map % positions)) [first second #(nth % 2)])})))
+
+(defn detect-clashes
+  "Broad-phase element clash detection using generated mesh bounds."
+  ([project] (detect-clashes project {}))
+  ([project {:keys [tolerance] :or {tolerance 0.0}}]
+   (vec
+    (mapcat
+     (fn [storey]
+       (keep (fn [[a b]]
+               (when-let [ba (mesh-bounds a)]
+                 (when-let [bb (mesh-bounds b)]
+                   (let [overlap (mapv (fn [lo-a hi-a lo-b hi-b]
+                                         (- (min hi-a hi-b) (max lo-a lo-b)))
+                                       (:min ba) (:max ba) (:min bb) (:max bb))]
+                     (when (every? #(< tolerance %) overlap)
+                       {:clash/storey (:id storey) :clash/a (:id a) :clash/b (:id b)
+                        :clash/kinds [(:kind a) (:kind b)] :clash/overlap overlap
+                        :clash/volume (reduce * overlap)})))))
+             (for [i (range (count (:elements storey)))
+                   j (range (inc i) (count (:elements storey)))]
+               [(nth (:elements storey) i) (nth (:elements storey) j)])))
+     (mapcat :storeys (mapcat :buildings (:sites project)))))))
