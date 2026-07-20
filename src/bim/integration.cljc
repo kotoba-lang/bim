@@ -9,10 +9,15 @@
 (def schema-version 1)
 
 (defn family-definition
-  [{:keys [id name category parameters formulas template]}]
+  [{:keys [id name category parameters formulas constraints types template]}]
   {:family/id id :family/name name :family/category category
    :family/parameters (or parameters {}) :family/formulas (or formulas {})
+   :family/constraints (vec constraints) :family/types (or types {})
    :family/template template :family/schema-version schema-version})
+
+(defn family-catalog [families]
+  {:family-catalog/schema-version schema-version
+   :family-catalog/families (into {} (map (juxt :family/id identity) families))})
 
 (defn- eval-expr [params expression]
   (cond
@@ -33,27 +38,130 @@
 
     :else expression))
 
+(defn- expression-parameters [expression]
+  (cond
+    (and (vector? expression) (= :param (first expression))) #{(second expression)}
+    (coll? expression) (into #{} (mapcat expression-parameters expression))
+    :else #{}))
+
+(defn- validate-parameter! [name spec value]
+  (let [valid-type? (case (:type spec)
+                      (:length :angle :area :volume :number :integer) (number? value)
+                      :boolean (boolean? value)
+                      (:text :material) (string? value)
+                      :enum (contains? (set (:allowed spec)) value)
+                      true)]
+    (when-not valid-type?
+      (throw (ex-info "family parameter has invalid type"
+                      {:parameter name :type (:type spec) :value value})))
+    (when (and (number? value) (number? (:min spec)) (< value (:min spec)))
+      (throw (ex-info "family parameter is below minimum"
+                      {:parameter name :minimum (:min spec) :value value})))
+    (when (and (number? value) (number? (:max spec)) (> value (:max spec)))
+      (throw (ex-info "family parameter is above maximum"
+                      {:parameter name :maximum (:max spec) :value value})))
+    value))
+
+(defn- validate-constraints! [family params]
+  (doseq [constraint (:family/constraints family)]
+    (case (:kind constraint)
+      :equal (let [left (eval-expr params (:left constraint))
+                   right (eval-expr params (:right constraint))
+                   tolerance (or (:tolerance constraint) 1.0e-9)]
+               (when (> (#?(:clj Math/abs :cljs js/Math.abs) (- left right)) tolerance)
+                 (throw (ex-info "family equality constraint failed"
+                                 {:constraint constraint :left left :right right}))))
+      :range (let [value (get params (:parameter constraint))]
+               (when (or (and (number? (:min constraint)) (< value (:min constraint)))
+                         (and (number? (:max constraint)) (> value (:max constraint))))
+                 (throw (ex-info "family range constraint failed"
+                                 {:constraint constraint :value value}))))
+      (throw (ex-info "unsupported family constraint" {:constraint constraint}))))
+  params)
+
 (defn resolve-family-parameters
-  "Resolve parameter defaults, overrides, then formulas in declaration order."
-  [family overrides]
-  (reduce-kv (fn [params k expression]
-               (assoc params k (eval-expr params expression)))
-             (merge (into {} (map (fn [[k spec]] [k (:default spec)])
-                                  (:family/parameters family)))
-                    overrides)
-             (:family/formulas family)))
+  "Resolve defaults and overrides, then formulas by dependency order. Cycles,
+  missing references, invalid values, and failed dimensional constraints throw."
+  ([family overrides] (resolve-family-parameters family nil overrides false))
+  ([family type-key overrides enforce-scopes?]
+   (let [specs (:family/parameters family)
+         type-spec (get-in family [:family/types type-key])
+         type-overrides (or (:parameters type-spec) {})]
+     (when enforce-scopes?
+       (doseq [name (keys type-overrides)]
+         (when (= :instance (get-in specs [name :scope]))
+           (throw (ex-info "type cannot override instance parameter" {:parameter name :type type-key}))))
+       (doseq [name (keys overrides)]
+         (when (= :type (get-in specs [name :scope]))
+           (throw (ex-info "instance cannot override type parameter" {:parameter name :type type-key})))))
+     (let [initial (merge (into {} (map (fn [[k spec]] [k (:default spec)]) specs))
+                          type-overrides overrides)
+           params
+           (loop [params initial pending (:family/formulas family)]
+             (if (empty? pending)
+               params
+               (let [ready (into {} (filter (fn [[_ expression]]
+                                              (every? #(contains? params %)
+                                                      (expression-parameters expression))) pending))]
+                 (when (empty? ready)
+                   (throw (ex-info "family formula dependency cycle or missing parameter"
+                                   {:pending (keys pending)})))
+                 (recur (reduce-kv (fn [result name expression]
+                                     (assoc result name (eval-expr result expression)))
+                                   params ready)
+                        (apply dissoc pending (keys ready))))))]
+       (doseq [[name spec] specs]
+         (validate-parameter! name spec (get params name)))
+       (validate-constraints! family params)))))
+
+(declare instantiate-family*)
+
+(defn- materialize-template [catalog value stack]
+  (cond
+    (and (map? value) (:family/ref value))
+    (let [family-id (:family/ref value)]
+      (when (contains? stack family-id)
+        (throw (ex-info "nested family cycle" {:family-id family-id :stack stack})))
+      (let [family (get-in catalog [:family-catalog/families family-id])]
+        (when-not family (throw (ex-info "nested family not found" {:family-id family-id})))
+        (instantiate-family* catalog family (:family/type value) (:id value)
+                             (:overrides value) (conj stack family-id))))
+    (map? value) (into (empty value) (map (fn [[k v]] [k (materialize-template catalog v stack)]) value))
+    (vector? value) (mapv #(materialize-template catalog % stack) value)
+    (seq? value) (map #(materialize-template catalog % stack) value)
+    :else value))
+
+(defn- instantiate-family* [catalog family type-key instance-id overrides stack]
+  (let [params (resolve-family-parameters family type-key overrides (some? catalog))
+        substituted (walk/postwalk #(if (and (vector? %) (= :param (first %)))
+                                      (get params (second %)) %)
+                                   (:family/template family))
+        body (if catalog (materialize-template catalog substituted stack) substituted)
+        type-spec (get-in family [:family/types type-key])]
+    (cond-> (assoc body :id instance-id
+                        :family/id (:family/id family)
+                        :family/type type-key
+                        :family/parameters params)
+      type-spec (assoc :type-object
+                       {:id (or (:id type-spec) (str (:family/id family) ":" (name type-key)))
+                        :global-id (:global-id type-spec)
+                        :name (or (:name type-spec) (name type-key))
+                        :element-type (:family/name family)
+                        :predefined-type (:predefined-type type-spec)}))))
 
 (defn instantiate-family
   "Materialize a serializable family template. A value shaped as [:param :x]
   is replaced by the resolved parameter value."
   [family instance-id overrides]
-  (let [params (resolve-family-parameters family overrides)
-        body (walk/postwalk #(if (and (vector? %) (= :param (first %)))
-                               (get params (second %)) %)
-                            (:family/template family))]
-    (assoc body :id instance-id
-                :family/id (:family/id family)
-                :family/parameters params)))
+  (instantiate-family* nil family nil instance-id overrides #{(:family/id family)}))
+
+(defn instantiate-family-type
+  "Instantiate a named family type from a catalog with instance overrides and
+  recursively materialize nested family references."
+  [catalog family-id type-key instance-id overrides]
+  (let [family (get-in catalog [:family-catalog/families family-id])]
+    (when-not family (throw (ex-info "family not found" {:family-id family-id})))
+    (instantiate-family* catalog family type-key instance-id overrides #{family-id})))
 
 (defn drawing-view
   [{:keys [id kind name scale storey-id section-box discipline]}]
