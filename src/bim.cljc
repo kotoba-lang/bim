@@ -146,6 +146,12 @@
 (defn text-value [v] {:kind :text :value v})
 (defn measured-value [value unit] {:kind :measured :value value :unit unit})
 (defn enum-value [value allowed] {:kind :enum :value value :allowed allowed})
+(defn enum-values [values allowed] {:kind :enum-list :values (vec values) :allowed (vec allowed)})
+(defn bounded-value [{:keys [lower upper set-point unit value-type]}]
+  {:kind :bounded :lower lower :upper upper :set-point set-point
+   :unit unit :value-type value-type})
+(defn list-value [values unit value-type]
+  {:kind :list :values (vec values) :unit unit :value-type value-type})
 
 (defn quantities
   ([] (quantities {}))
