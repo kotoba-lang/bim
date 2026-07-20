@@ -303,16 +303,18 @@
                               :mullion-offset {:type :length :default 0.0}}
                  :reference-planes
                  {:left {:axis :x :offset 0.0 :locked true}
-                  :right {:axis :x :offset [:+ [:reference :left] [:param :width]]}
-                  :mullion {:axis :x :offset [:+ [:reference :left]
-                                               [:/ [:param :width] 2.0]]}
+                  :right {:axis :x}
+                  :mullion {:axis :x :offset [:/ [:+ [:reference :left]
+                                                     [:reference :right]] 2.0]}
                   :sill {:axis :z :offset [:param :mullion-offset]}
-                  :head {:axis :z :offset [:+ [:reference :sill] [:param :height]]}}
+                  :head {:axis :z}
+                  :origin-copy {:axis :x}}
                  :constraints
                  [{:kind :distance :from :left :to :right :value [:param :width]}
                   {:kind :distance :from :left :to :mullion
                    :value [:/ [:param :width] 2.0]}
-                  {:kind :distance :from :sill :to :head :value [:param :height]}]
+                  {:kind :distance :from :sill :to :head :value [:param :height]}
+                  {:kind :coincident :left :left :right :origin-copy}]
                  :template
                  {:kind :window :name "Double Window"
                   :geometry {:kind :extruded-area-solid
@@ -331,6 +333,10 @@
            1.0e-9))
     (is (= [0.0 0.0 0.3] (get-in instance [:geometry :position :location])))
     (is (= 0.9 (get-in instance [:mullion :x])))
+    (is (= :constraint
+           (get-in instance [:family/reference-planes :right :solved-by])))
+    (is (= 0.0
+           (get-in instance [:family/reference-planes :origin-copy :offset])))
     (is (= 2.3 (get-in instance [:family/reference-planes :head :offset])))))
 
 (deftest rejects-family-formula-and-nesting-cycles
