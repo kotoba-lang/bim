@@ -692,6 +692,8 @@
    :material (exported-material element)
    :classifications (exported-classifications element)
    :type-object (:type-object element)
+   :appearance (:appearance element)
+   :presentation-layers (:presentation-layers element)
    :ports (mapv exported-port (:mep/connectors element))
    :openings (if (= :wall (:kind element))
                (mapv #(exported-opening element %) (:openings element)) [])})
@@ -946,6 +948,8 @@
                   :ifc/quantity-sets (:quantity-sets source)
                   :ifc/material (:material source)
                   :ifc/classifications (:classifications source)
+                  :appearance (:appearance source)
+                  :presentation-layers (:presentation-layers source)
                   :mep/connectors
                   (mapv #(imported-connector % (get connected-port-by-id (:global-id %)))
                         (:ports source))

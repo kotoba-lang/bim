@@ -661,6 +661,31 @@
     (is (= "Heating" (get-in imported [:ifc/groups 0 :name])))
     (is (= 1 (count (:ifc/connections imported))))))
 
+(deftest ifc-presentation-style-round-trip
+  (let [appearance {:name "Concrete Blue" :color-name "Blue"
+                    :surface-color [0.15 0.3 0.75] :transparency 0.1
+                    :side :both :reflectance-method :matt}
+        layers [{:name "A-WALL" :description "Architectural walls"
+                 :identifier "A-WALL"}]
+        project (-> (integrated-project)
+                    (update-in [:sites 0 :buildings 0 :storeys 0 :elements 0]
+                               assoc :appearance appearance :presentation-layers layers))
+        text (ifc/write-standard-spf project)
+        imported (integration/import-ifc-spf text)
+        wall (get-in imported [:sites 0 :buildings 0 :storeys 0 :elements 0])
+        edited (assoc-in imported
+                         [:sites 0 :buildings 0 :storeys 0 :elements 0
+                          :appearance :surface-color]
+                         [0.8 0.2 0.1])
+        reimported (integration/import-ifc-spf (ifc/write-standard-spf edited))]
+    (is (string/includes? text "IFCSURFACESTYLERENDERING"))
+    (is (string/includes? text "IFCPRESENTATIONLAYERASSIGNMENT"))
+    (is (= appearance (:appearance wall)))
+    (is (= layers (:presentation-layers wall)))
+    (is (= [0.8 0.2 0.1]
+           (get-in reimported [:sites 0 :buildings 0 :storeys 0 :elements 0
+                               :appearance :surface-color])))))
+
 (deftest ifc-spf-and-svg-deliverables
   (let [opening (bim/rectangular-opening {:id 20 :offset 2.0 :width 0.9 :height 2.1
                                           :filled-by 30})
