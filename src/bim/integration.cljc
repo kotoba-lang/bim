@@ -1014,19 +1014,22 @@
 
 (defn- element-anchor-point [element anchor]
   (let [axis (get-in element [:geometry :axis])
-        boundary (get-in element [:geometry :boundary])]
-    (some->
-     (cond
-       (= :start anchor) (first axis)
-       (= :end anchor) (second axis)
-       (= :midpoint anchor) (when (= 2 (count axis))
-                              (mapv #(/ (+ %1 %2) 2.0) (first axis) (second axis)))
-       (= :origin anchor) (or (get-in element [:placement :location]) (first axis))
-       (and (map? anchor) (integer? (:vertex anchor)))
-       (get boundary (:vertex anchor))
-       (vector? anchor) anchor
-       :else nil)
-     vec (subvec 0 2))))
+        boundary (get-in element [:geometry :boundary])
+        point (cond
+                (= :start anchor) (first axis)
+                (= :end anchor) (second axis)
+                (= :midpoint anchor) (when (= 2 (count axis))
+                                       (mapv #(/ (+ %1 %2) 2.0)
+                                             (first axis) (second axis)))
+                (= :origin anchor) (or (get-in element [:placement :location])
+                                       (first axis))
+                (and (map? anchor) (integer? (:vertex anchor)))
+                (get boundary (:vertex anchor))
+                (vector? anchor) anchor
+                :else nil)]
+    (when (and (sequential? point) (<= 2 (count point))
+               (every? number? (take 2 point)))
+      (subvec (vec point) 0 2))))
 
 (defn reassociate-drawing-annotation
   "Update associative annotation points from current model geometry. Missing
