@@ -625,6 +625,42 @@
     (is (= 2 (count (:mep.analysis/segments analysis))))
     (is (pos? (:mep.analysis/total-pressure-loss-pa analysis)))))
 
+(deftest ifc-system-and-connector-graph-round-trip
+  (let [connector-a (integration/mep-connector
+                     {:id "port-a" :point [1 0 0] :direction [1 0 0] :domain :piping
+                      :shape :round :size 0.1 :flow-direction :out :connected-to "port-b"})
+        connector-b (integration/mep-connector
+                     {:id "port-b" :point [1 0 0] :direction [-1 0 0] :domain :piping
+                      :shape :round :size 0.1 :flow-direction :in :connected-to "port-a"})
+        segment-a (integration/mep-segment
+                   {:id 201 :kind :pipe :start [0 0 0] :end [1 0 0] :diameter 0.1
+                    :system-id :heating :connectors [connector-a]})
+        segment-b (integration/mep-segment
+                   {:id 202 :kind :pipe :start [1 0 0] :end [2 0 0] :diameter 0.1
+                    :system-id :heating :connectors [connector-b]})
+        project (-> (integrated-project)
+                    (bim/add-element 3 segment-a)
+                    (bim/add-element 3 segment-b)
+                    (assoc :ifc/groups
+                           [{:id "heating" :global-id "heating-system"
+                             :kind :distribution-system :name "Heating"
+                             :predefined-type :heating
+                             :member-global-ids ["201" "202"]}]))
+        text (ifc/write-standard-spf project)
+        imported (integration/import-ifc-spf text)
+        elements (get-in imported [:sites 0 :buildings 0 :storeys 0 :elements])
+        by-id (into {} (map (juxt :global-id identity) elements))]
+    (is (string/includes? text "IFCDISTRIBUTIONSYSTEM"))
+    (is (string/includes? text "IFCDISTRIBUTIONPORT"))
+    (is (string/includes? text "IFCRELCONNECTSPORTS"))
+    (is (= "port-b" (get-in by-id ["201" :mep/connectors 0
+                                    :connector/connected-to])))
+    (is (= :out (get-in by-id ["201" :mep/connectors 0
+                               :connector/flow-direction])))
+    (is (= :piping (get-in by-id ["201" :mep/connectors 0 :connector/domain])))
+    (is (= "Heating" (get-in imported [:ifc/groups 0 :name])))
+    (is (= 1 (count (:ifc/connections imported))))))
+
 (deftest ifc-spf-and-svg-deliverables
   (let [opening (bim/rectangular-opening {:id 20 :offset 2.0 :width 0.9 :height 2.1
                                           :filled-by 30})
