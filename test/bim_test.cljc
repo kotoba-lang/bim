@@ -357,6 +357,40 @@
     (is (= 1.2 (get-in instance [:geometry :width])))
     (is (= 2.0 (get-in instance [:geometry :panel-count])))))
 
+(deftest shared-parameters-and-revit-type-catalog-round-trip
+  (let [family (integration/family-definition
+                {:id "catalog-door" :name "Catalog Door" :category :door
+                 :shared-parameters
+                 {:fire-rating {:guid "12345678-1234-4abc-8def-1234567890ab"
+                                :name "Fire Rating" :type :text :scope :type
+                                :default "30 min"}}
+                 :parameters
+                 {:width {:type :length :scope :type :default 0.9
+                          :catalog-unit "MILLIMETERS"}
+                  :enabled {:type :boolean :scope :type :default true}}
+                 :template {:kind :door :name "Catalog Door"
+                            :geometry {:width [:param :width]}
+                            :fire-rating [:param :fire-rating]}})
+        csv (str ",Width##LENGTH##MILLIMETERS,Fire Rating##TEXT##,Enabled##YESNO##\n"
+                 "\"Wide, Exterior\",1200,60 min,1\n"
+                 "Narrow,800,30 min,0\n")
+        imported (integration/import-family-type-catalog family csv)
+        exported (integration/export-family-type-catalog imported)
+        reimported (integration/import-family-type-catalog family exported)
+        catalog (integration/family-catalog [imported])
+        instance (integration/instantiate-family-type
+                  catalog "catalog-door" :wide-exterior 73 {})]
+    (is (= 1.2 (get-in imported [:family/types :wide-exterior :parameters :width])))
+    (is (= "60 min"
+           (get-in imported [:family/types :wide-exterior :parameters :fire-rating])))
+    (is (false? (get-in imported [:family/types :narrow :parameters :enabled])))
+    (is (string/includes? exported "width##LENGTH##MILLIMETERS"))
+    (is (= (:family/types imported) (:family/types reimported)))
+    (is (= 1.2 (get-in instance [:geometry :width])))
+    (is (= "60 min" (:fire-rating instance)))
+    (is (= "12345678-1234-4abc-8def-1234567890ab"
+           (get-in imported [:family/shared-parameters :fire-rating :guid])))))
+
 (deftest reference-plane-constraints-drive-family-geometry
   (let [family (integration/family-definition
                 {:id "window-double" :name "Double Window" :category :window
