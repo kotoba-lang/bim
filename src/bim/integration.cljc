@@ -1110,18 +1110,32 @@
                         :name (:description classification))
                  (assoc-in [:source :name] (:source classification)))))))
 
-(defn- exported-opening [wall opening]
-  (let [[[x0 y0 z0] [x1 y1 _]] (get-in wall [:geometry :axis])
-        length (get-in wall [:quantities :length-m])
-        {:keys [offset sill]} (:placement opening)
-        {:keys [width height]} (:profile opening)
-        x (+ x0 (* (/ offset length) (- x1 x0)))
-        y (+ y0 (* (/ offset length) (- y1 y0)))]
-    {:id (:id opening) :global-id (str (:id opening)) :kind :opening :name "Opening"
-     :filled-by (:filled-by opening) :placement {:location [x y (+ z0 sill)]}
-     :geometry {:kind :extruded-area-solid
-                :profile {:kind :rectangle :x-dim width :y-dim (:depth opening)}
-                :direction [0.0 0.0 1.0] :depth height}}))
+(defn- exported-opening [host opening]
+  (case (:kind host)
+    :wall
+    (let [[[x0 y0 z0] [x1 y1 _]] (get-in host [:geometry :axis])
+          length (get-in host [:quantities :length-m])
+          {:keys [offset sill]} (:placement opening)
+          {:keys [width height]} (:profile opening)
+          x (+ x0 (* (/ offset length) (- x1 x0)))
+          y (+ y0 (* (/ offset length) (- y1 y0)))]
+      {:id (:id opening) :global-id (str (:id opening)) :kind :opening :name "Opening"
+       :filled-by (:filled-by opening) :placement {:location [x y (+ z0 sill)]}
+       :geometry {:kind :extruded-area-solid
+                  :profile {:kind :rectangle :x-dim width :y-dim (:depth opening)}
+                  :direction [0.0 0.0 1.0] :depth height}})
+    :slab
+    (let [boundary (:boundary opening) z (nth (first boundary) 2 0.0)]
+      {:id (:id opening) :global-id (str (:id opening)) :kind :opening
+       :name (or (:name opening) "Shaft opening") :filled-by (:filled-by opening)
+       :placement {:location [0.0 0.0 z]}
+       :geometry {:kind :extruded-area-solid
+                  :profile {:kind :arbitrary-closed
+                            :points (mapv (fn [[x y _]] [x y])
+                                          (conj (vec boundary) (first boundary)))}
+                  :direction [0.0 0.0 1.0]
+                  :depth (get-in host [:geometry :thickness])}})
+    opening))
 
 (defn- connector-flow->ifc [flow]
   (case flow :in :sink :out :source :bidirectional :sourceandsink
@@ -1153,7 +1167,7 @@
    :appearance (:appearance element)
    :presentation-layers (:presentation-layers element)
    :ports (mapv exported-port (:mep/connectors element))
-   :openings (if (= :wall (:kind element))
+   :openings (if (contains? #{:wall :slab} (:kind element))
                (mapv #(exported-opening element %) (:openings element)) [])})
 
 (defn- exported-connections [elements]
@@ -1351,6 +1365,16 @@
          host)))
    wall (:openings source)))
 
+(defn- imported-slab-openings [source]
+  (mapv (fn [opening]
+          (let [[ox oy oz] (get-in opening [:placement :location] [0.0 0.0 0.0])
+                points (get-in opening [:geometry :profile :points])
+                points (if (= (first points) (last points)) (butlast points) points)]
+            (bim/slab-opening
+             {:id (:id opening)
+              :boundary (mapv (fn [[x y]] [(+ ox x) (+ oy y) oz]) points)})))
+        (:openings source)))
+
 (defn- ifc-flow->connector [flow]
   (case flow :sink :in :source :out :sourceandsink :bidirectional :notdefined nil nil))
 
@@ -1415,6 +1439,8 @@
                   :material-layers (if (seq material-layers)
                                      material-layers (:material-layers result))
                   :classification (or classification (:classification result))
+                  :openings (if (= :slab (:kind source))
+                              (imported-slab-openings source) (:openings result))
                   :psets (merge (:psets result) psets))))
 
 (defn- imported-unit-system [document]

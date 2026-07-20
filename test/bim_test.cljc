@@ -1821,3 +1821,52 @@
          (bim/curtain-wall {:id 91 :start [0 0 0] :end [1 0 0]
                             :height 1.0 :columns 20 :rows 1
                             :mullion-width 0.1})))))
+
+(deftest compound-slab-shaft-opening-cuts-mesh-quantities-and-ifc
+  (let [layers [(bim/material-layer "Concrete" 0.10 false :concrete)
+                (bim/material-layer "Finish" 0.05 false :finish)]
+        floor (-> (bim/compound-slab
+                   {:id 100 :name "Level floor"
+                    :boundary [[0.0 0.0 0.0] [10.0 0.0 0.0]
+                               [10.0 8.0 0.0] [0.0 8.0 0.0]]
+                    :layers layers})
+                  (bim/add-opening-to-slab
+                   (bim/slab-opening
+                    {:id 101 :boundary [[4.0 3.0 0.0] [6.0 3.0 0.0]
+                                        [6.0 5.0 0.0] [4.0 5.0 0.0]]})))
+        mesh (bim/element-mesh floor)
+        project (bim/add-element (integrated-project) 3 floor)
+        text (ifc/write-standard-spf project)
+        imported (integration/import-ifc-spf text)
+        imported-floor (first (filter #(= "100" (:global-id %))
+                                      (get-in imported [:sites 0 :buildings 0 :storeys 0
+                                                        :elements])))]
+    (is (< (#?(:clj Math/abs :cljs js/Math.abs)
+            (- 0.15 (get-in floor [:geometry :thickness]))) 1.0e-12))
+    (is (= 80.0 (get-in floor [:quantities :gross-area-m2])))
+    (is (= 76.0 (get-in floor [:quantities :net-area-m2])))
+    (is (< (#?(:clj Math/abs :cljs js/Math.abs)
+            (- 11.4 (get-in floor [:quantities :net-volume-m3]))) 1.0e-12))
+    (is (= [8.0 4.0] (mapv :gross-volume-m3 (:material-layers floor))))
+    (is (> (count (:positions mesh)) 16))
+    (is (seq (:indices mesh)))
+    (is (not-any?
+         (fn [[a b c]]
+           (let [points (mapv #(nth (:positions mesh) %) [a b c])
+                 [x y] (mapv #(/ % 3.0) (apply mapv + points))]
+             (and (every? #(< (#?(:clj Math/abs :cljs js/Math.abs)
+                                 (- 0.15 (nth % 2))) 1.0e-9) points)
+                  (< 4.0 x 6.0) (< 3.0 y 5.0))))
+         (partition 3 (:indices mesh)))
+        "top surface has no triangles spanning the shaft")
+    (is (string/includes? text "IFCRELVOIDSELEMENT"))
+    (is (= 1 (count (:openings imported-floor))))
+    (is (= [[4.0 3.0 0.0] [6.0 3.0 0.0]
+            [6.0 5.0 0.0] [4.0 5.0 0.0]]
+           (get-in imported-floor [:openings 0 :boundary])))
+    (is (thrown-with-msg?
+         #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+         #"inside the slab"
+         (bim/add-opening-to-slab
+          floor (bim/slab-opening
+                 {:id 102 :boundary [[9 7 0] [11 7 0] [11 9 0] [9 9 0]]}))))))
