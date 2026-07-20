@@ -1738,3 +1738,28 @@
          #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
          #"planar rectangle"
          (bim/gable-roof {:id 61 :boundary [[0 0 0] [4 0 0] [3 2 0] [0 2 0]]})))))
+
+(deftest straight-stair-derives-treads-quantities-and-ifc-geometry
+  (let [stair (bim/straight-stair
+               {:id 70 :start [1.0 2.0 0.0] :direction [0.0 2.0 0.0]
+                :width 1.2 :run-length 3.6 :total-rise 3.0 :riser-count 18})
+        mesh (bim/element-mesh stair)
+        project (bim/add-element (integrated-project) 3 stair)
+        imported (integration/import-ifc-spf (ifc/write-standard-spf project))
+        imported-stair (first (filter #(= "70" (:global-id %))
+                                      (get-in imported [:sites 0 :buildings 0 :storeys 0
+                                                        :elements])))]
+    (is (= :straight-run (get-in stair [:stair/definition :kind])))
+    (is (= [0.0 1.0 0.0] (get-in stair [:stair/definition :direction])))
+    (is (= 18 (count (get-in stair [:geometry :items]))))
+    (is (= 0.2 (get-in stair [:quantities :tread-depth-m])))
+    (is (< (#?(:clj Math/abs :cljs js/Math.abs)
+            (- (/ 3.0 18.0) (get-in stair [:quantities :riser-height-m]))) 1.0e-12))
+    (is (seq (:positions mesh)))
+    (is (= :stair (:kind imported-stair)))
+    (is (= :collection (get-in imported-stair [:geometry :kind])))
+    (is (= 18 (count (get-in imported-stair [:geometry :items]))))
+    (is (thrown-with-msg?
+         #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+         #"at least two risers"
+         (bim/straight-stair {:id 71 :start [0 0 0] :riser-count 1})))))
