@@ -582,16 +582,51 @@
         clamp (fn [value [lower upper]] (max lower (min upper value)))
         spline-surface (assoc surface :u-knots u-knots :v-knots v-knots)
         point (fn [u v] (spline/surface-point spline-surface u v))
-        sample (fn [u v]
-                 (let [position (point u v)
-                       u0 (clamp (- u u-epsilon) u-range) u1 (clamp (+ u u-epsilon) u-range)
+        normal (fn [u v]
+                 (let [u0 (clamp (- u u-epsilon) u-range) u1 (clamp (+ u u-epsilon) u-range)
                        v0 (clamp (- v v-epsilon) v-range) v1 (clamp (+ v v-epsilon) v-range)
                        du (v3-sub (point u1 v) (point u0 v))
                        dv (v3-sub (point u v1) (point u v0))]
-                   {:position position :normal (v3-normalize (v3-cross du dv))}))]
+                   (v3-normalize (v3-cross du dv))))
+        sample (fn [u v]
+                 {:position (point u v) :normal (normal u v)})
+        midpoint (fn [a b] (mapv #(/ % 2.0) (mapv + a b)))
+        subdivide (fn [triangles]
+                    (vec (mapcat (fn [[a b c]]
+                                   (let [ab (midpoint a b) bc (midpoint b c) ca (midpoint c a)]
+                                     [[a ab ca] [ab b bc] [ca bc c] [ab bc ca]]))
+                                 triangles)))
+        trimmed-mesh
+        (when (seq (:bounds face))
+          (let [ordered (sort-by #(if (= :outer (:kind %)) 0 1) (:bounds face))
+                rings (mapv (fn [bound]
+                              (let [uvs (mapv #(-> (spline/closest-surface-parameters
+                                                    spline-surface (point3 %))
+                                                   :parameters)
+                                              (:points bound))]
+                                (cond-> uvs (false? (:orientation bound)) reverse)))
+                            ordered)
+                triangulated (polygon/triangulate-rings rings identity)
+                triangles (mapv (fn [[a b c]]
+                                  [(nth (:vertices triangulated) a)
+                                   (nth (:vertices triangulated) b)
+                                   (nth (:vertices triangulated) c)])
+                                (partition 3 (:indices triangulated)))
+                refined (nth (iterate subdivide triangles) 2)
+                uvs (vec (mapcat identity refined))
+                vertices (mapv #(apply sample %) uvs)
+                reversed? (false? (:same-sense face))]
+            {:positions (mapv :position vertices)
+             :normals (mapv (fn [{:keys [normal]}]
+                              (if reversed? (mapv - normal) normal)) vertices)
+             :indices (if reversed?
+                        (vec (mapcat (fn [[a b c]] [a c b])
+                                     (partition 3 (range (count vertices)))))
+                        (vec (range (count vertices))))}))]
     (when (and (pos? u-count) (pos? v-count))
-      (parametric-surface-mesh face u-range v-range 16 16
-                               (true? (:u-closed surface)) (true? (:v-closed surface)) sample))))
+      (or trimmed-mesh
+          (parametric-surface-mesh face u-range v-range 16 16
+                                   (true? (:u-closed surface)) (true? (:v-closed surface)) sample)))))
 
 (defn- cylindrical-face-mesh [face]
   (let [surface (:surface face) position (:position surface)

@@ -488,3 +488,31 @@
     (is (= [0.0 0.0 0.0] (first (:positions mesh))))
     (is (= [2.0 2.0 1.0] (last (:positions mesh))))
     (is (every? #(not= [0.0 0.0 0.0] %) (:normals mesh)))))
+
+(deftest trims-nurbs-face-with-an-inner-hole
+  (let [surface {:kind :b-spline-surface :u-degree 1 :v-degree 1
+                 :control-points [[[0 0 0] [0 2 0]] [[2 0 0] [2 2 1]]]
+                 :u-multiplicities [2 2] :v-multiplicities [2 2]
+                 :u-knots [0.0 1.0] :v-knots [0.0 1.0]}
+        surface-point (fn [u v] [(* 2.0 u) (* 2.0 v) (* u v)])
+        ring (fn [uvs] (mapv #(apply surface-point %) uvs))
+        mesh (bim/element-mesh
+              {:geometry {:kind :advanced-brep
+                          :faces [{:same-sense true :surface surface
+                                   :bounds [{:kind :outer :orientation true
+                                             :points (ring [[0 0] [1 0] [1 1] [0 1]])}
+                                            {:kind :inner :orientation true
+                                             :points (ring [[0.25 0.25] [0.25 0.75]
+                                                           [0.75 0.75] [0.75 0.25]])}]}]}})
+        projected-area
+        (reduce + (map (fn [[a b c]]
+                         (let [[ax ay] (nth (:positions mesh) a)
+                               [bx by] (nth (:positions mesh) b)
+                               [cx cy] (nth (:positions mesh) c)]
+                           (/ (#?(:clj Math/abs :cljs js/Math.abs)
+                               (- (* (- bx ax) (- cy ay)) (* (- by ay) (- cx ax))))
+                              2.0)))
+                       (partition 3 (:indices mesh))))]
+    (is (pos? (count (:positions mesh))))
+    (is (= (count (:positions mesh)) (count (:indices mesh))))
+    (is (< (#?(:clj Math/abs :cljs js/Math.abs) (- projected-area 3.0)) 1.0e-3))))
