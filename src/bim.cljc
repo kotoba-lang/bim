@@ -312,6 +312,18 @@
   (let [[x y & [z]] (or point [0.0 0.0 0.0])]
     [(or x 0.0) (or y 0.0) (or z 0.0)]))
 
+(declare v3-normalize v3-cross)
+(defn- prism-mesh [boundary extrusion]
+  (let [n (count boundary) top (mapv #(mapv + % extrusion) boundary)
+        positions (into (vec boundary) top)
+        bottom-tris (mapcat (fn [i] [0 (inc i) i]) (range 1 (dec n)))
+        top-tris (mapcat (fn [i] [n (+ n i) (+ n (inc i))]) (range 1 (dec n)))
+        sides (mapcat (fn [i]
+                        (let [j (mod (inc i) n)] [i j (+ n i), j (+ n j) (+ n i)]))
+                      (range n))]
+    {:positions positions :indices (vec (concat bottom-tris top-tris sides))
+     :normals (vec (repeat (* 2 n) (v3-normalize extrusion)))}))
+
 (defn- extruded-area-mesh [geometry]
   (let [profile (:profile geometry)
         raw-points (case (:kind profile)
@@ -334,12 +346,23 @@
                                  [(- w) (+ (- d) flange)]])
                      nil)
         points (if (= (first raw-points) (last raw-points)) (vec (butlast raw-points)) raw-points)
-        [ox oy oz] (get-in geometry [:position :location] [0.0 0.0 0.0])
+        origin (point3 (get-in geometry [:position :location]))
+        z-axis (v3-normalize (point3 (or (get-in geometry [:position :axis]) [0.0 0.0 1.0])))
+        x-axis (v3-normalize (point3 (or (get-in geometry [:position :ref-direction]) [1.0 0.0 0.0])))
+        y-axis (v3-normalize (v3-cross z-axis x-axis))
         [px py pz] (get-in profile [:position :location] [0.0 0.0 0.0])
         boundary (mapv (fn [point] (let [[x y z] (point3 point)]
-                                     [(+ ox px x) (+ oy py y) (+ oz pz z)])) points)]
+                                     (mapv + origin
+                                           (mapv #(* (+ px x) %) x-axis)
+                                           (mapv #(* (+ py y) %) y-axis)
+                                           (mapv #(* (+ pz z) %) z-axis)))) points)
+        [dx dy dz] (point3 (or (:direction geometry) [0.0 0.0 1.0]))
+        unit-direction (v3-normalize
+                        (mapv + (mapv #(* dx %) x-axis)
+                              (mapv #(* dy %) y-axis) (mapv #(* dz %) z-axis)))
+        extrusion (mapv #(* (:depth geometry) %) unit-direction)]
     (when (>= (count boundary) 3)
-      (slab-mesh {:geometry {:boundary boundary :thickness (:depth geometry)}}))))
+      (prism-mesh boundary extrusion))))
 
 (defn- transform-point [[x y z] {:keys [axis1 axis2 axis3 origin scale scale2 scale3]} mapping-origin]
   (let [[mx my mz] (point3 (:location mapping-origin))
@@ -398,6 +421,50 @@
 (defn- v3-normalize [v]
   (let [length (sqrt (reduce + (map #(* % %) v)))]
     (if (pos? length) (mapv #(/ % length) v) [0.0 0.0 0.0])))
+(defn- v3-dot [a b] (reduce + (map * a b)))
+
+(defn- clipped-extrusion [extrusion half-space]
+  (let [z-axis (v3-normalize (point3 (or (get-in extrusion [:position :axis]) [0 0 1])))
+        x-axis (v3-normalize (point3 (or (get-in extrusion [:position :ref-direction]) [1 0 0])))
+        y-axis (v3-normalize (v3-cross z-axis x-axis))
+        [dx dy dz] (point3 (or (:direction extrusion) [0 0 1]))
+        direction (v3-normalize (mapv + (mapv #(* dx %) x-axis)
+                                        (mapv #(* dy %) y-axis)
+                                        (mapv #(* dz %) z-axis)))
+        normal (v3-normalize (point3 (get-in half-space [:base-surface :position :axis])))
+        base (point3 (get-in extrusion [:position :location]))
+        plane (point3 (get-in half-space [:base-surface :position :location]))
+        denominator (v3-dot normal direction)
+        depth (:depth extrusion)]
+    (when (> (#?(:clj Math/abs :cljs js/Math.abs) denominator) 0.999)
+      (let [intersection (/ (v3-dot normal (v3-sub plane base)) denominator)
+            agreement? (true? (:agreement-flag half-space))
+            keep-after? (if agreement? (neg? denominator) (pos? denominator))
+            start (if keep-after? (max 0.0 intersection) 0.0)
+            end (if keep-after? depth (min depth intersection))]
+        (when (> end start)
+          (-> extrusion
+              (assoc :depth (- end start))
+              (assoc-in [:position :location]
+                        (mapv + base (mapv #(* start %) direction)))))))))
+
+(defn- boolean-result-mesh [geometry]
+  (let [first-operand (:first-operand geometry) second-operand (:second-operand geometry)]
+    (case (:operator geometry)
+      :union (let [meshes (keep geometry-mesh [first-operand second-operand])]
+               (when (seq meshes) (merge-meshes meshes)))
+      :difference
+      (when (and (= :extruded-area-solid (:kind first-operand))
+                 (= :half-space-solid (:kind second-operand)))
+        (some-> (clipped-extrusion first-operand second-operand) extruded-area-mesh))
+      :intersection
+      (when (and (= :extruded-area-solid (:kind first-operand))
+                 (= :half-space-solid (:kind second-operand)))
+        ;; Intersection is the complementary extrusion interval.
+        (some-> (clipped-extrusion first-operand
+                                   (update second-operand :agreement-flag not))
+                extruded-area-mesh))
+      nil)))
 
 (defn- swept-disk-mesh [geometry]
   (let [path (mapv point3 (:directrix geometry)) ring-size 12 radius (:radius geometry)
@@ -448,10 +515,7 @@
     :swept-disk-solid (swept-disk-mesh geometry)
     :collection (let [meshes (keep geometry-mesh (:items geometry))]
                   (when (seq meshes) (merge-meshes meshes)))
-    :boolean-result (when (= :union (:operator geometry))
-                      (let [meshes (keep geometry-mesh [(:first-operand geometry)
-                                                        (:second-operand geometry)])]
-                        (when (seq meshes) (merge-meshes meshes))))
+    :boolean-result (boolean-result-mesh geometry)
     nil))
 
 (declare wall-with-openings-mesh)
