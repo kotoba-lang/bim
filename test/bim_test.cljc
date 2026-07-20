@@ -6,6 +6,7 @@
             [bim]
             [bim.integration :as integration]
             [bim.ifc :as ifc]
+            [bim.mep :as mep]
             [bim.drawing :as drawing]))
 
 (deftest namespace-loads
@@ -998,6 +999,31 @@
     (is (<= (:mep/velocity-m-s sizing) 2.0))
     (is (= [:b] (get-in analysis [:mep.analysis/connector-graph :a])))
     (is (= 2 (count (:mep.analysis/segments analysis))))
+    (is (pos? (:mep.analysis/total-pressure-loss-pa analysis)))))
+
+(deftest applies-constant-gravity-slope-to-routed-mep-paths
+  (let [graded (integration/grade-mep-route
+                [[0 0 3] [3 0 3] [3 4 3] [6 4 3]] 0.02)]
+    (is (= [[0 0 3] [3 0 2.94] [3 4 2.86] [6 4 2.8]] graded))
+    (is (thrown? #?(:clj Exception :cljs js/Error)
+                 (integration/grade-mep-route [[0 0 0]] 0.02)))))
+
+(deftest validates-and-analyzes-routes-through-owned-fittings
+  (let [assembly (mep/route-assembly
+                  {:id "route-1" :system-id :hydronic :domain :piping
+                   :shape :round :size 0.1
+                   :points [[0 0 3] [2 0 2.96] [2 2 2.92]]})
+        system (integration/mep-system
+                {:id :hydronic :kind :hydronic :medium :water :design-flow 0.005
+                 :segments (:mep.assembly/segments assembly)
+                 :fittings (:mep.assembly/fittings assembly)})
+        analysis (integration/analyze-mep-system
+                  system {:roughness-m 1.5e-6 :density-kg-m3 998.0
+                          :viscosity-pa-s 0.001})]
+    (is (empty? (integration/validate-mep-system system)))
+    (is (= 1 (count (:mep/fittings system))))
+    (is (= ["route-1-f1-in"]
+           (get-in analysis [:mep.analysis/connector-graph "route-1-s0-end"])))
     (is (pos? (:mep.analysis/total-pressure-loss-pa analysis)))))
 
 (deftest owns-and-atomically-connects-mep-equipment-connectors
