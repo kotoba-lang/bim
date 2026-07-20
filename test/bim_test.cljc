@@ -1558,7 +1558,9 @@
                     {:kind :extruded-area-solid :depth 2.0} [1.0 2.0 3.0])
                    [:position :location])))
     (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
-                 (bim/translate-element wall [1.0 2.0])))))
+                 (bim/translate-element wall [1.0 2.0])))
+    (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+                 (bim/translate-element wall [##NaN 0.0 0.0])))))
 
 (deftest element-duplication-renews-identities-and-detaches-topology
   (let [source (-> (bim/wall {:id 10 :start [0 0 0] :end [4 0 0]})

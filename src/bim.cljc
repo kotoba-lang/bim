@@ -327,7 +327,10 @@
 (defn translate-element
   "Move an element without changing its identity, type, quantities, or links."
   [element delta]
-  (when-not (and (= 3 (count delta)) (every? number? delta))
+  (when-not (and (= 3 (count delta))
+                 (every? #(and (number? %)
+                               #?(:clj (Double/isFinite (double %))
+                                  :cljs (js/Number.isFinite %))) delta))
     (throw (ex-info "element translation must be a numeric 3D delta" {:delta delta})))
   (-> element
       (update :placement translate-placement delta)
