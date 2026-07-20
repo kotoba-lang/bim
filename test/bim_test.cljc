@@ -785,6 +785,39 @@
     (is (= 2 (count (:mep.analysis/segments analysis))))
     (is (pos? (:mep.analysis/total-pressure-loss-pa analysis)))))
 
+(deftest sizes-and-balances-branching-mep-networks
+  (let [network {:source-node :pump
+                 :segments [{:id :main :from :pump :to :tee :length-m 10.0}
+                            {:id :branch-a :from :tee :to :terminal-a :length-m 20.0}
+                            {:id :branch-b :from :tee :to :terminal-b :length-m 5.0}]
+                 :terminal-demands {:terminal-a 0.003 :terminal-b 0.002}}
+        result (integration/size-and-balance-mep-network
+                network
+                {:roughness-m 1.5e-6 :density-kg-m3 998.0 :viscosity-pa-s 0.001}
+                {:available-diameters-m [0.04 0.05 0.063 0.075 0.09]
+                 :max-velocity-m-s 2.0 :equipment-efficiency 0.7
+                 :pressure-safety-factor 1.1})
+        segments (into {} (map (juxt :id identity) (:mep.network/segments result)))
+        paths (into {} (map (juxt :terminal identity)
+                            (:mep.network/terminal-paths result)))]
+    (is (= 0.005 (:mep.network/source-flow-m3-s result)))
+    (is (= 0.005 (get-in segments [:main :segment/flow-m3-s])))
+    (is (= 0.003 (get-in segments [:branch-a :segment/flow-m3-s])))
+    (is (= 0.002 (get-in segments [:branch-b :segment/flow-m3-s])))
+    (is (= [:main :branch-a] (get-in paths [:terminal-a :segment-ids])))
+    (is (zero? (get-in paths [:terminal-a :balancing-pressure-pa])))
+    (is (pos? (get-in paths [:terminal-b :balancing-pressure-pa])))
+    (is (> (:mep.network/required-equipment-pressure-pa result)
+           (:mep.network/critical-pressure-loss-pa result)))
+    (is (pos? (:mep.network/equipment-power-w result)))
+    (is (thrown-with-msg?
+         #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+         #"terminal demands"
+         (integration/size-and-balance-mep-network
+          (assoc network :terminal-demands {:terminal-a 0.003})
+          {:roughness-m 1.5e-6 :density-kg-m3 998.0 :viscosity-pa-s 0.001}
+          {:available-diameters-m [0.063] :max-velocity-m-s 2.0})))))
+
 (deftest ifc-system-and-connector-graph-round-trip
   (let [connector-a (integration/mep-connector
                      {:id "port-a" :point [1 0 0] :direction [1 0 0] :domain :piping

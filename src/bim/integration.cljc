@@ -1820,6 +1820,110 @@
     {:mep/required-diameter-m required :mep/diameter-m selected
      :mep/velocity-m-s (/ flow-m3-s (* pi (/ (* selected selected) 4.0)))}))
 
+(defn size-and-balance-mep-network
+  "Size a directed tree network from terminal demands, calculate segment
+  Darcy-Weisbach losses, identify the critical path, and report balancing
+  pressure for every terminal plus pump/fan duty."
+  [{:keys [source-node segments terminal-demands]} fluid
+   {:keys [available-diameters-m max-velocity-m-s equipment-efficiency
+           pressure-safety-factor]
+    :or {max-velocity-m-s 2.0 equipment-efficiency 0.7 pressure-safety-factor 1.1}}]
+  (let [ids (map :id segments)
+        children (group-by :from segments)
+        parent-count (frequencies (map :to segments))
+        all-nodes (set (concat [source-node] (map :from segments) (map :to segments)))
+        leaf-nodes (set (remove #(contains? children %) all-nodes))
+        downstream-flow
+        (fn downstream-flow [node stack]
+          (when (contains? stack node)
+            (throw (ex-info "MEP network contains a cycle" {:node node :stack stack})))
+          (+ (or (get terminal-demands node) 0.0)
+             (reduce + (map #(downstream-flow (:to %) (conj stack node))
+                            (get children node)))))
+        reachable
+        (loop [pending [source-node] visited #{}]
+          (if-let [node (peek pending)]
+            (if (contains? visited node)
+              (recur (pop pending) visited)
+              (recur (into (pop pending) (map :to (get children node)))
+                     (conj visited node)))
+            visited))
+        _ (when-not (seq segments)
+            (throw (ex-info "MEP network requires at least one segment" {})))
+        _ (when-not (= (count ids) (count (distinct ids)))
+            (throw (ex-info "MEP network contains duplicate segment ids" {:ids ids})))
+        _ (when-let [node (first (keep (fn [[node count]] (when (> count 1) node))
+                                        parent-count))]
+            (throw (ex-info "MEP network must be a directed tree" {:node node})))
+        _ (when-not (= reachable all-nodes)
+            (throw (ex-info "MEP network has unreachable nodes"
+                            {:unreachable (set (remove reachable all-nodes))})))
+        _ (when-not (= leaf-nodes (set (keys terminal-demands)))
+            (throw (ex-info "terminal demands must cover exactly the network leaves"
+                            {:leaf-nodes leaf-nodes
+                             :demand-nodes (set (keys terminal-demands))})))
+        _ (doseq [[node demand] terminal-demands]
+            (when-not (and (number? demand) (pos? demand))
+              (throw (ex-info "terminal demand must be positive"
+                              {:node node :flow-m3-s demand}))))
+        _ (doseq [{:keys [id length-m]} segments]
+            (when-not (and (number? length-m) (pos? length-m))
+              (throw (ex-info "MEP segment length must be positive"
+                              {:segment id :length-m length-m}))))
+        _ (when-not (and (seq available-diameters-m)
+                         (every? #(and (number? %) (pos? %)) available-diameters-m))
+            (throw (ex-info "available MEP diameters must be positive"
+                            {:available-diameters-m available-diameters-m})))
+        _ (when-not (and (number? max-velocity-m-s) (pos? max-velocity-m-s))
+            (throw (ex-info "maximum MEP velocity must be positive"
+                            {:max-velocity-m-s max-velocity-m-s})))
+        _ (when-not (and (number? equipment-efficiency)
+                         (pos? equipment-efficiency) (<= equipment-efficiency 1.0))
+            (throw (ex-info "equipment efficiency must be in (0, 1]"
+                            {:equipment-efficiency equipment-efficiency})))
+        _ (when-not (and (number? pressure-safety-factor)
+                         (>= pressure-safety-factor 1.0))
+            (throw (ex-info "pressure safety factor must be at least one"
+                            {:pressure-safety-factor pressure-safety-factor})))
+        _ (doseq [key [:roughness-m :density-kg-m3 :viscosity-pa-s]]
+            (when-not (and (number? (get fluid key)) (pos? (get fluid key)))
+              (throw (ex-info "fluid properties must be positive"
+                              {:property key :value (get fluid key)}))))
+        source-flow (downstream-flow source-node #{})
+        sized
+        (mapv (fn [segment]
+                (let [flow (downstream-flow (:to segment) #{})
+                      sizing (size-round-mep-segment flow max-velocity-m-s
+                                                     available-diameters-m)
+                      loss (pressure-loss
+                            (merge fluid {:length-m (:length-m segment)
+                                          :diameter-m (:mep/diameter-m sizing)
+                                          :flow-m3-s flow}))]
+                  (merge segment sizing loss {:segment/flow-m3-s flow})))
+              segments)
+        sized-children (group-by :from sized)
+        paths
+        (letfn [(visit [node path loss]
+                  (let [outgoing (get sized-children node)]
+                    (if (seq outgoing)
+                      (mapcat (fn [segment]
+                                (visit (:to segment) (conj path (:id segment))
+                                       (+ loss (:mep/pressure-loss-pa segment))))
+                              outgoing)
+                      [{:terminal node :segment-ids path :pressure-loss-pa loss}])))]
+          (vec (visit source-node [] 0.0)))
+        critical-loss (reduce max 0.0 (map :pressure-loss-pa paths))
+        paths (mapv #(assoc % :balancing-pressure-pa
+                            (- critical-loss (:pressure-loss-pa %))) paths)
+        required-pressure (* critical-loss pressure-safety-factor)
+        duty-power (/ (* source-flow required-pressure) equipment-efficiency)]
+    {:mep.network/source-node source-node :mep.network/source-flow-m3-s source-flow
+     :mep.network/segments sized :mep.network/terminal-paths paths
+     :mep.network/critical-pressure-loss-pa critical-loss
+     :mep.network/required-equipment-pressure-pa required-pressure
+     :mep.network/equipment-power-w duty-power
+     :mep.network/equipment-efficiency equipment-efficiency}))
+
 (declare validate-mep-system)
 
 (defn analyze-mep-system
