@@ -1790,3 +1790,34 @@
          #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
          #"valid path"
          (bim/path-railing {:id 81 :path [[0 0 0]]})))))
+
+(deftest curtain-wall-generates-panel-grid-frame-and-formal-ifc-entity
+  (let [curtain (bim/curtain-wall
+                 {:id 90 :start [0.0 0.0 0.0] :end [8.0 0.0 0.0]
+                  :height 4.0 :columns 4 :rows 2 :panel-thickness 0.03
+                  :mullion-width 0.05 :frame-depth 0.15})
+        mesh (bim/element-mesh curtain)
+        project (bim/add-element (integrated-project) 3 curtain)
+        text (ifc/write-standard-spf project)
+        imported (integration/import-ifc-spf text)
+        imported-curtain (first (filter #(= "90" (:global-id %))
+                                        (get-in imported [:sites 0 :buildings 0 :storeys 0
+                                                          :elements])))]
+    (is (= :grid (get-in curtain [:curtain/definition :kind])))
+    (is (= 8 (get-in curtain [:quantities :panel-count])))
+    (is (= 5 (get-in curtain [:quantities :mullion-count])))
+    (is (= 3 (get-in curtain [:quantities :transom-count])))
+    (is (= 16 (count (get-in curtain [:geometry :items]))))
+    (is (= ["Insulated glass" "Aluminium"]
+           (mapv :material (:material-layers curtain))))
+    (is (seq (:positions mesh)))
+    (is (string/includes? text "IFCCURTAINWALL"))
+    (is (= :curtain (:kind imported-curtain)))
+    (is (= :collection (get-in imported-curtain [:geometry :kind])))
+    (is (= 16 (count (get-in imported-curtain [:geometry :items]))))
+    (is (thrown-with-msg?
+         #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+         #"cells must exceed"
+         (bim/curtain-wall {:id 91 :start [0 0 0] :end [1 0 0]
+                            :height 1.0 :columns 20 :rows 1
+                            :mullion-width 0.1})))))
