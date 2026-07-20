@@ -357,6 +357,44 @@
     (is (= 1.2 (get-in instance [:geometry :width])))
     (is (= 2.0 (get-in instance [:geometry :panel-count])))))
 
+(deftest shared-nested-material-and-detail-level-family-presentation
+  (let [handle (integration/family-definition
+                {:id "shared-handle" :name "Shared Handle" :category :furniture
+                 :shared? true
+                 :parameters {:finish {:type :material
+                                       :default {:id "steel" :name "Stainless Steel"}}}
+                 :template {:kind :furniture
+                            :material [:material-param :finish]
+                            :geometry {:kind :handle}}})
+        cabinet (integration/family-definition
+                 {:id "detailed-cabinet" :name "Detailed Cabinet" :category :furniture
+                  :parameters {:finish {:type :material :default "Oak"}
+                               :show-trim {:type :boolean :default true}}
+                  :template {:kind :furniture
+                             :material [:material-param :finish]
+                             :components [{:id "coarse-box" :kind :furniture
+                                           :family/visibility {:detail-levels [:coarse :medium]}}
+                                          {:family/ref "shared-handle" :id "handle-1"
+                                           :overrides {:finish [:param :finish]}}
+                                          {:id "fine-trim" :kind :furniture
+                                           :family/visibility
+                                           {:visible? [:param :show-trim]
+                                            :detail-levels [:fine]}}]}})
+        catalog (integration/family-catalog [handle cabinet])
+        medium (integration/instantiate-family-type
+                catalog "detailed-cabinet" nil 75 {:finish "Walnut"}
+                {:detail-level :medium})
+        fine (integration/instantiate-family-type
+              catalog "detailed-cabinet" nil 76 {:finish "Walnut" :show-trim false}
+              {:detail-level :fine})]
+    (is (= "Walnut" (:material medium)))
+    (is (= ["coarse-box" "handle-1"] (mapv :id (:components medium))))
+    (is (= "Walnut" (get-in medium [:components 1 :material])))
+    (is (= ["handle-1"] (mapv :id (:family/shared-instances medium))))
+    (is (true? (get-in medium [:family/shared-instances 0 :family/shared?])))
+    (is (= ["handle-1"] (mapv :id (:components fine))))
+    (is (= false (get-in fine [:family/parameters :show-trim])))))
+
 (deftest shared-parameters-and-revit-type-catalog-round-trip
   (let [family (integration/family-definition
                 {:id "catalog-door" :name "Catalog Door" :category :door
