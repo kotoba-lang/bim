@@ -108,6 +108,24 @@
     (is (= 12 (count (:indices mesh))))
     (is (= [0.0 0.0 1.0] (first (:normals mesh))))))
 
+(deftest circular-and-swept-disk-mesh-projection
+  (let [column (bim/element {:id 61 :kind :column :name "Round"
+                             :geometry {:kind :extruded-area-solid
+                                        :profile {:kind :circle :radius 0.25}
+                                        :depth 3.0}})
+        pipe (bim/element {:id 62 :kind :mep-segment :name "Pipe"
+                           :geometry {:kind :swept-disk-solid :radius 0.1
+                                      :directrix [[0 0 0] [4 0 0] [4 3 0]]}})
+        column-mesh (bim/element-mesh column)
+        pipe-mesh (bim/element-mesh pipe)]
+    (is (= 48 (count (:positions column-mesh))))
+    (is (= 276 (count (:indices column-mesh))))
+    (is (= 36 (count (:positions pipe-mesh))))
+    (is (= 144 (count (:indices pipe-mesh))))
+    (is (every? #(< (#?(:clj Math/abs :cljs js/Math.abs)
+                       (- 1.0 (reduce + (map (fn [v] (* v v)) %)))) 1.0e-9)
+                (:normals pipe-mesh)))))
+
 (deftest storey-lifecycle-integrity
   (let [ground (bim/storey {:id 3 :name "Ground" :elevation 0 :height 3.2 :placement :identity :spaces [] :elements []})
         project (-> (bim/project "Tower")

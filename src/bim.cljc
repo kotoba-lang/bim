@@ -318,6 +318,20 @@
                      :rectangle (let [hx (/ (:x-dim profile) 2.0) hy (/ (:y-dim profile) 2.0)]
                                   [[(- hx) (- hy)] [hx (- hy)] [hx hy] [(- hx) hy]])
                      :arbitrary-closed (:points profile)
+                     :circle (mapv (fn [i]
+                                     (let [angle (* 2.0 #?(:clj Math/PI :cljs js/Math.PI) (/ i 24.0))]
+                                       [(* (:radius profile) (#?(:clj Math/cos :cljs js/Math.cos) angle))
+                                        (* (:radius profile) (#?(:clj Math/sin :cljs js/Math.sin) angle))]))
+                                   (range 24))
+                     :i-shape (let [w (/ (:overall-width profile) 2.0)
+                                    d (/ (:overall-depth profile) 2.0)
+                                    web (/ (:web-thickness profile) 2.0)
+                                    flange (:flange-thickness profile)]
+                                [[(- w) (- d)] [w (- d)] [w (+ (- d) flange)]
+                                 [web (+ (- d) flange)] [web (- d flange)] [w (- d flange)]
+                                 [w d] [(- w) d] [(- w) (- d flange)]
+                                 [(- web) (- d flange)] [(- web) (+ (- d) flange)]
+                                 [(- w) (+ (- d) flange)]])
                      nil)
         points (if (= (first raw-points) (last raw-points)) (vec (butlast raw-points)) raw-points)
         [ox oy oz] (get-in geometry [:position :location] [0.0 0.0 0.0])
@@ -378,12 +392,60 @@
         meshes (keep #(indexed-face-mesh (:coordinates geometry) %) indices)]
     (when (seq meshes) (merge-meshes meshes))))
 
+(defn- v3-sub [a b] (mapv - a b))
+(defn- v3-cross [[ax ay az] [bx by bz]]
+  [(- (* ay bz) (* az by)) (- (* az bx) (* ax bz)) (- (* ax by) (* ay bx))])
+(defn- v3-normalize [v]
+  (let [length (sqrt (reduce + (map #(* % %) v)))]
+    (if (pos? length) (mapv #(/ % length) v) [0.0 0.0 0.0])))
+
+(defn- swept-disk-mesh [geometry]
+  (let [path (mapv point3 (:directrix geometry)) ring-size 12 radius (:radius geometry)
+        last-index (dec (count path))
+        frames (mapv (fn [i]
+                       (let [tangent (v3-normalize
+                                      (cond (= i 0) (v3-sub (nth path 1) (nth path 0))
+                                            (= i last-index) (v3-sub (nth path i) (nth path (dec i)))
+                                            :else (v3-sub (nth path (inc i)) (nth path (dec i)))))
+                             reference (if (> (#?(:clj Math/abs :cljs js/Math.abs) (nth tangent 2)) 0.9)
+                                         [0.0 1.0 0.0] [0.0 0.0 1.0])
+                             u (v3-normalize (v3-cross tangent reference))
+                             v (v3-normalize (v3-cross tangent u))]
+                         [u v]))
+                     (range (count path)))
+        rings (mapv (fn [point [u v]]
+                      (mapv (fn [j]
+                              (let [angle (* 2.0 #?(:clj Math/PI :cljs js/Math.PI)
+                                             (/ j ring-size))
+                                    c (#?(:clj Math/cos :cljs js/Math.cos) angle)
+                                    s (#?(:clj Math/sin :cljs js/Math.sin) angle)
+                                    normal (mapv + (mapv #(* c %) u) (mapv #(* s %) v))]
+                                {:position (mapv + point (mapv #(* radius %) normal))
+                                 :normal normal}))
+                            (range ring-size)))
+                    path frames)
+        vertices (vec (mapcat identity rings))
+        sides (mapcat (fn [ring]
+                        (mapcat (fn [j]
+                                  (let [next-j (mod (inc j) ring-size)
+                                        a (+ (* ring ring-size) j)
+                                        b (+ (* ring ring-size) next-j)
+                                        c (+ (* (inc ring) ring-size) j)
+                                        d (+ (* (inc ring) ring-size) next-j)]
+                                    [a b c b d c]))
+                                (range ring-size)))
+                      (range last-index))]
+    (when (>= (count path) 2)
+      {:positions (mapv :position vertices) :normals (mapv :normal vertices)
+       :indices (vec sides)})))
+
 (defn- geometry-mesh [geometry]
   (case (:kind geometry)
     :extruded-area-solid (extruded-area-mesh geometry)
     :mapped-item (mapped-item-mesh geometry)
     :faceted-brep (faceted-brep-mesh geometry)
     (:triangulated-face-set :polygonal-face-set) (tessellated-mesh geometry)
+    :swept-disk-solid (swept-disk-mesh geometry)
     :collection (let [meshes (keep geometry-mesh (:items geometry))]
                   (when (seq meshes) (merge-meshes meshes)))
     :boolean-result (when (= :union (:operator geometry))
