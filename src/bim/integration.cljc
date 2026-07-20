@@ -2493,14 +2493,93 @@
                  :structural.overlay/color color}))
             (:structural/members model))})))
 
-(defn mep-system [{:keys [id name kind medium design-flow segments]}]
+(defn mep-system [{:keys [id name kind medium design-flow segments equipment]}]
   {:mep/id id :mep/name name :mep/kind kind :mep/medium medium
-   :mep/design-flow design-flow :mep/segments (vec segments)})
+   :mep/design-flow design-flow :mep/segments (vec segments)
+   :mep/equipment (vec equipment)})
 
 (defn mep-connector [{:keys [id point direction domain shape size flow-direction connected-to]}]
   {:connector/id id :connector/point (vec point) :connector/direction (vec direction)
    :connector/domain domain :connector/shape shape :connector/size size
    :connector/flow-direction flow-direction :connector/connected-to connected-to})
+
+(defn mep-equipment
+  "Create BIM equipment or a terminal with owned MEP connectors and demands."
+  [{:keys [id name kind system-id placement geometry connectors demands properties]}]
+  (when-not (and (some? id) kind (seq connectors))
+    (throw (ex-info "MEP equipment requires identity, kind, and connectors"
+                    {:id id :kind kind})))
+  (let [connector-ids (map :connector/id connectors)]
+    (when-not (= (count connector-ids) (count (distinct connector-ids)))
+      (throw (ex-info "MEP equipment contains duplicate connector ids"
+                      {:equipment-id id :connector-ids connector-ids})))
+    {:id id :kind :mep-equipment :name (or name (str kind " " id)) :discipline :mep
+     :mep/equipment-kind kind :mep/system-id system-id
+     :mep/connectors (mapv #(assoc % :connector/owner-id id) connectors)
+     :mep/demands (or demands {}) :mep/properties (or properties {})
+     :placement (or placement :identity) :geometry geometry}))
+
+(defn- connector-index [elements connector-id]
+  (first
+   (keep-indexed
+    (fn [element-index element]
+      (when-let [connector-position
+                 (first (keep-indexed #(when (= connector-id (:connector/id %2)) %1)
+                                      (:mep/connectors element)))]
+        [element-index connector-position]))
+    elements)))
+
+(defn connect-mep-elements
+  "Atomically connect two owned connectors after checking position, domain,
+  shape, size, direction and flow compatibility."
+  ([elements connector-a-id connector-b-id]
+   (connect-mep-elements elements connector-a-id connector-b-id {}))
+  ([elements connector-a-id connector-b-id {:keys [position-tolerance-m size-tolerance]
+                                             :or {position-tolerance-m 1.0e-4
+                                                  size-tolerance 1.0e-6}}]
+   (let [elements (vec elements)
+         [element-a index-a :as location-a] (connector-index elements connector-a-id)
+         [element-b index-b :as location-b] (connector-index elements connector-b-id)]
+     (when-not (and location-a location-b)
+       (throw (ex-info "MEP connector not found"
+                       {:connector-a connector-a-id :connector-b connector-b-id})))
+     (when (= location-a location-b)
+       (throw (ex-info "MEP connector cannot connect to itself" {:connector connector-a-id})))
+     (let [a (get-in elements [element-a :mep/connectors index-a])
+           b (get-in elements [element-b :mep/connectors index-b])
+           distance (vector-length (vector-sub (:connector/point a) (:connector/point b)))
+           direction-dot (when (and (seq (:connector/direction a)) (seq (:connector/direction b)))
+                           (reduce + (map * (:connector/direction a)
+                                          (:connector/direction b))))
+           same-flow? (and (contains? #{:in :out} (:connector/flow-direction a))
+                           (= (:connector/flow-direction a) (:connector/flow-direction b)))]
+       (when (or (:connector/connected-to a) (:connector/connected-to b))
+         (throw (ex-info "MEP connector is already connected"
+                         {:connector-a a :connector-b b})))
+       (when-not (= (:connector/domain a) (:connector/domain b))
+         (throw (ex-info "MEP connector domains are incompatible" {:a a :b b})))
+       (when-not (= (:connector/shape a) (:connector/shape b))
+         (throw (ex-info "MEP connector shapes are incompatible" {:a a :b b})))
+       (when (> (math-abs (- (:connector/size a) (:connector/size b))) size-tolerance)
+         (throw (ex-info "MEP connector sizes require a transition" {:a a :b b})))
+       (when (> distance position-tolerance-m)
+         (throw (ex-info "MEP connectors are not coincident"
+                         {:distance-m distance :tolerance-m position-tolerance-m})))
+       (when (and direction-dot (> direction-dot -0.999))
+         (throw (ex-info "MEP connector directions must oppose" {:dot direction-dot})))
+       (when same-flow?
+         (throw (ex-info "MEP connector flow directions are incompatible"
+                         {:flow (:connector/flow-direction a)})))
+       {:mep/elements
+        (-> elements
+            (assoc-in [element-a :mep/connectors index-a :connector/connected-to]
+                      connector-b-id)
+            (assoc-in [element-b :mep/connectors index-b :connector/connected-to]
+                      connector-a-id))
+        :mep/connection {:connector-a connector-a-id :connector-b connector-b-id
+                         :owner-a (:id (elements element-a)) :owner-b (:id (elements element-b))
+                         :domain (:connector/domain a) :shape (:connector/shape a)
+                         :size (:connector/size a)}}))))
 
 (defn mep-segment
   [{:keys [id name kind start end diameter width height system-id connectors connected-to]}]
