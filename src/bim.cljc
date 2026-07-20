@@ -1298,6 +1298,89 @@
           full-height (map (fn [[a b]] (box a b 0 wall-height)) (filter (fn [[a b]] (< a b)) gaps))]
       (merge-meshes (concat full-height vertical)))))
 
+(defn- distance3 [a b]
+  (sqrt (reduce + (map (fn [x y] (let [delta (- x y)] (* delta delta))) a b))))
+
+(defn set-wall-axis
+  "Replace a wall axis, update length quantities, and preserve hosted opening
+  world positions. Rejects edits that would cut through an opening."
+  [wall-element [start end :as axis]]
+  (when-not (and (= :wall (:kind wall-element)) (= 2 (count axis))
+                 (valid-point3? start) (valid-point3? end))
+    (throw (ex-info "wall axis edit requires a wall and two 3D points" {:axis axis})))
+  (let [length (distance3 start end)]
+    (when (< length 1.0e-9)
+      (throw (ex-info "wall axis endpoints must not coincide" {:axis axis})))
+    (let [[old-start old-end] (get-in wall-element [:geometry :axis])
+          old-length (distance3 old-start old-end)
+          old-direction (mapv #(/ % old-length) (mapv - old-end old-start))
+          direction (mapv #(/ % length) (mapv - end start))
+          openings
+          (mapv (fn [opening]
+                  (let [old-offset (get-in opening [:placement :offset])
+                        world-point (mapv + old-start (mapv #(* old-offset %) old-direction))
+                        offset (reduce + (map * (mapv - world-point start) direction))
+                        width (get-in opening [:profile :width])]
+                    (when (or (< offset -1.0e-8) (> (+ offset width) (+ length 1.0e-8)))
+                      (throw (ex-info "wall axis edit would cut a hosted opening"
+                                      {:wall-id (:id wall-element) :opening-id (:id opening)
+                                       :offset offset :width width :wall-length length})))
+                    (assoc-in opening [:placement :offset] (max 0.0 offset))))
+                (:openings wall-element))]
+      (-> wall-element
+          (assoc-in [:geometry :axis] [(vec start) (vec end)])
+          (assoc-in [:quantities :length-m] length)
+          (assoc :openings openings)))))
+
+(defn offset-wall
+  "Offset a wall in its local plan perpendicular by a signed distance."
+  [wall-element distance]
+  (when-not (finite-number? distance)
+    (throw (ex-info "wall offset must be numeric" {:distance distance})))
+  (let [[[x0 y0 z0] [x1 y1 z1]] (get-in wall-element [:geometry :axis])
+        dx (- x1 x0) dy (- y1 y0) plan-length (sqrt (+ (* dx dx) (* dy dy)))]
+    (when (< plan-length 1.0e-9)
+      (throw (ex-info "wall offset requires a non-vertical plan axis" {:wall-id (:id wall-element)})))
+    (let [shift [(* distance (/ (- dy) plan-length))
+                 (* distance (/ dx plan-length)) 0.0]]
+      (set-wall-axis wall-element
+                     [(mapv + [x0 y0 z0] shift) (mapv + [x1 y1 z1] shift)]))))
+
+(defn- line-intersection-xy [[a b] [c d]]
+  (let [[x1 y1] a [x2 y2] b [x3 y3] c [x4 y4] d
+        denominator (- (* (- x1 x2) (- y3 y4)) (* (- y1 y2) (- x3 x4)))]
+    (when (> (#?(:clj Math/abs :cljs js/Math.abs) denominator) 1.0e-12)
+      [(/ (- (* (- (* x1 y2) (* y1 x2)) (- x3 x4))
+               (* (- x1 x2) (- (* x3 y4) (* y3 x4)))) denominator)
+       (/ (- (* (- (* x1 y2) (* y1 x2)) (- y3 y4))
+               (* (- y1 y2) (- (* x3 y4) (* y3 x4)))) denominator)])))
+
+(defn- replace-nearest-endpoint [[start end] point]
+  (if (<= (distance3 start point) (distance3 end point)) [point end] [start point]))
+
+(defn trim-extend-walls
+  "Trim or extend two non-parallel plan walls to their infinite-line intersection."
+  [left right]
+  (when-not (and (= :wall (:kind left)) (= :wall (:kind right)))
+    (throw (ex-info "trim/extend requires two walls" {})))
+  (let [left-axis (get-in left [:geometry :axis]) right-axis (get-in right [:geometry :axis])]
+    (when (> (#?(:clj Math/abs :cljs js/Math.abs)
+              (- (nth (first left-axis) 2) (nth (first right-axis) 2))) 1.0e-6)
+      (throw (ex-info "trim/extend walls must share an elevation"
+                      {:left-id (:id left) :right-id (:id right)})))
+    (when-let [[x y] (line-intersection-xy left-axis right-axis)]
+      (let [left-point [x y (nth (first left-axis) 2)]
+            right-point [x y (nth (first right-axis) 2)]]
+        [(set-wall-axis left (replace-nearest-endpoint left-axis left-point))
+         (set-wall-axis right (replace-nearest-endpoint right-axis right-point))]))))
+
+(defn join-walls
+  "Join two walls at their plan intersection and retain the join relationship."
+  [left right]
+  (when-let [[joined-left joined-right] (trim-extend-walls left right)]
+    [(update joined-left :wall/joins (fnil conj #{}) (:id right))
+     (update joined-right :wall/joins (fnil conj #{}) (:id left))]))
+
 (defn merge-meshes [meshes]
   (loop [remaining meshes positions [] normals [] indices []]
     (if-let [m (first remaining)]
@@ -1311,6 +1394,26 @@
     (when (seq positions)
       {:min (mapv #(reduce min (map % positions)) [first second #(nth % 2)])
        :max (mapv #(reduce max (map % positions)) [first second #(nth % 2)])})))
+
+(defn align-element
+  "Translate an element so one bounds anchor aligns to a reference anchor on an axis."
+  [reference moving {:keys [axis reference-anchor moving-anchor]
+                     :or {axis :x reference-anchor :center moving-anchor :center}}]
+  (let [axis-index ({:x 0 :y 1 :z 2} axis)
+        anchor-value (fn [bounds anchor]
+                       (case anchor
+                         :min (nth (:min bounds) axis-index)
+                         :max (nth (:max bounds) axis-index)
+                         :center (/ (+ (nth (:min bounds) axis-index)
+                                       (nth (:max bounds) axis-index)) 2.0)
+                         (throw (ex-info "unsupported alignment anchor" {:anchor anchor}))))
+        reference-bounds (mesh-bounds reference) moving-bounds (mesh-bounds moving)]
+    (when-not (and axis-index reference-bounds moving-bounds)
+      (throw (ex-info "alignment requires an axis and renderable elements" {:axis axis})))
+    (let [distance (- (anchor-value reference-bounds reference-anchor)
+                      (anchor-value moving-bounds moving-anchor))
+          delta (assoc [0.0 0.0 0.0] axis-index distance)]
+      (translate-element moving delta))))
 
 (defn detect-clashes
   "Broad-phase element clash detection using generated mesh bounds."

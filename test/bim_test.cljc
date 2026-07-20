@@ -1608,3 +1608,38 @@
                  (get-in (second radial) [:geometry :axis]))))
     (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
                  (bim/mirror-element wall [0 0 0] [0 0 0])))))
+
+(deftest wall-offset-align-trim-and-join-preserve-authoring-invariants
+  (let [left (bim/wall {:id 10 :start [0.0 0.0 0.0] :end [4.0 0.0 0.0]})
+        right (bim/wall {:id 11 :start [3.0 2.0 0.0] :end [3.0 5.0 0.0]})
+        offset (bim/offset-wall left 2.0)
+        aligned (bim/align-element left right
+                                   {:axis :y :reference-anchor :center :moving-anchor :min})
+        [trimmed-left trimmed-right] (bim/trim-extend-walls left right)
+        [joined-left joined-right] (bim/join-walls left right)]
+    (is (= [[0.0 2.0 0.0] [4.0 2.0 0.0]] (get-in offset [:geometry :axis])))
+    (is (= 4.0 (get-in offset [:quantities :length-m])))
+    (is (= 0.0 (apply min (map second (:positions (bim/element-mesh aligned))))))
+    (is (= [[0.0 0.0 0.0] [3.0 0.0 0.0]] (get-in trimmed-left [:geometry :axis])))
+    (is (= [[3.0 0.0 0.0] [3.0 5.0 0.0]] (get-in trimmed-right [:geometry :axis])))
+    (is (= 3.0 (get-in trimmed-left [:quantities :length-m])))
+    (is (= #{11} (:wall/joins joined-left)))
+    (is (= #{10} (:wall/joins joined-right)))
+    (is (thrown-with-msg?
+         #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+         #"share an elevation"
+         (bim/trim-extend-walls left
+                                (bim/wall {:id 12 :start [3 2 4] :end [3 5 4]}))))))
+
+(deftest wall-axis-edit-preserves-or-rejects-hosted-openings
+  (let [wall (-> (bim/wall {:id 20 :start [0.0 0.0 0.0] :end [10.0 0.0 0.0]})
+                 (bim/add-opening-to-wall
+                  (bim/rectangular-opening {:id 21 :offset 8.0 :width 1.0
+                                            :height 2.0})))
+        extended (bim/set-wall-axis wall [[-2.0 0.0 0.0] [10.0 0.0 0.0]])]
+    (is (= 10.0 (get-in extended [:openings 0 :placement :offset])))
+    (is (= 12.0 (get-in extended [:quantities :length-m])))
+    (is (thrown-with-msg?
+         #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+         #"cut a hosted opening"
+         (bim/set-wall-axis wall [[0.0 0.0 0.0] [5.0 0.0 0.0]])))))
