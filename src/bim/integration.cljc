@@ -762,10 +762,13 @@
    :structural.node/restraints (vec (or restraints [false false]))})
 
 (defn structural-analysis-member
-  [{:keys [id start-node end-node area-m2 elastic-modulus-pa section material]}]
+  [{:keys [id start-node end-node area-m2 elastic-modulus-pa yield-strength-pa
+           resistance-factor section material]}]
   {:structural.member/id id :structural.member/start-node start-node
    :structural.member/end-node end-node :structural.member/area-m2 area-m2
    :structural.member/elastic-modulus-pa elastic-modulus-pa
+   :structural.member/yield-strength-pa yield-strength-pa
+   :structural.member/resistance-factor (or resistance-factor 0.9)
    :structural.member/section section :structural.member/material material})
 
 (defn structural-load-case [{:keys [id name kind nodal-loads]}]
@@ -773,9 +776,15 @@
    :structural.load-case/kind (or kind :service)
    :structural.load-case/nodal-loads (vec nodal-loads)})
 
-(defn structural-model [{:keys [nodes members load-cases]}]
+(defn structural-load-combination [{:keys [id name factors kind]}]
+  {:structural.combination/id id :structural.combination/name name
+   :structural.combination/kind (or kind :ultimate)
+   :structural.combination/factors factors})
+
+(defn structural-model [{:keys [nodes members load-cases combinations]}]
   {:structural/schema-version schema-version :structural/nodes (vec nodes)
-   :structural/members (vec members) :structural/load-cases (vec load-cases)})
+   :structural/members (vec members) :structural/load-cases (vec load-cases)
+   :structural/combinations (vec combinations)})
 
 (defn validate-structural-model [model]
   (let [nodes (into {} (map (juxt :structural.node/id identity) (:structural/nodes model)))]
@@ -896,6 +905,57 @@
                               [(nth displacements (* 2 index)) (nth displacements (inc (* 2 index)))]]) nodes))
      :structural.analysis/member-axial-forces member-forces}))
 
+(defn analyze-structural-combination
+  "Analyze a factored load combination and check axial member resistance."
+  [model combination-id]
+  (let [combination (first (filter #(= combination-id (:structural.combination/id %))
+                                   (:structural/combinations model)))]
+    (when-not combination
+      (throw (ex-info "structural load combination not found"
+                      {:combination-id combination-id})))
+    (let [case-by-id (into {} (map (juxt :structural.load-case/id identity)
+                                   (:structural/load-cases model)))
+          combined-loads
+          (->> (:structural.combination/factors combination)
+               (mapcat (fn [[case-id factor]]
+                         (when-not (contains? case-by-id case-id)
+                           (throw (ex-info "structural load case not found"
+                                           {:load-case-id case-id
+                                            :combination-id combination-id})))
+                         (map (fn [{:keys [node fx fy]}]
+                                {:node node :fx (* factor (or fx 0.0))
+                                 :fy (* factor (or fy 0.0))})
+                              (:structural.load-case/nodal-loads (case-by-id case-id)))))
+               (group-by :node)
+               (mapv (fn [[node loads]]
+                       {:node node :fx (reduce + (map :fx loads))
+                        :fy (reduce + (map :fy loads))})))
+          synthetic-id [:combination combination-id]
+          analysis (analyze-2d-truss
+                    (update model :structural/load-cases conj
+                            (structural-load-case {:id synthetic-id :name (:structural.combination/name combination)
+                                                   :kind (:structural.combination/kind combination)
+                                                   :nodal-loads combined-loads}))
+                    synthetic-id)
+          member-by-id (into {} (map (juxt :structural.member/id identity)
+                                     (:structural/members model)))
+          checks
+          (into {}
+                (map (fn [[member-id force]]
+                       (let [member (member-by-id member-id)
+                             yield (:structural.member/yield-strength-pa member)
+                             resistance (when (number? yield)
+                                          (* (:structural.member/area-m2 member) yield
+                                             (:structural.member/resistance-factor member)))
+                             utilization (when (and resistance (pos? resistance))
+                                           (/ (math-abs force) resistance))]
+                         [member-id {:force-n force :resistance-n resistance
+                                     :utilization utilization
+                                     :passes? (when utilization (<= utilization 1.0))}]))
+                     (:structural.analysis/member-axial-forces analysis)))]
+      (assoc analysis :structural.analysis/combination combination-id
+             :structural.analysis/member-checks checks))))
+
 (defn structural-member
   "Attach an analytical line, section and load-bearing role to a BIM element."
   [element {:keys [role analytical-axis section material loads]}]
@@ -983,6 +1043,48 @@
                                         (/ 5.74 (pow reynolds 0.9)))) 2.0)))
         loss (* friction (/ length-m diameter-m) (/ (* density-kg-m3 velocity velocity) 2.0))]
     {:mep/reynolds reynolds :mep/friction-factor friction :mep/pressure-loss-pa loss}))
+
+(defn size-round-mep-segment
+  "Select the minimum circular diameter for a design flow and velocity limit."
+  [flow-m3-s max-velocity-m-s available-diameters-m]
+  (let [required (sqrt (/ (* 4.0 flow-m3-s) (* pi max-velocity-m-s)))
+        selected (first (sort (filter #(>= % required) available-diameters-m)))]
+    (when-not selected
+      (throw (ex-info "no available MEP diameter satisfies velocity limit"
+                      {:required-diameter-m required :available available-diameters-m})))
+    {:mep/required-diameter-m required :mep/diameter-m selected
+     :mep/velocity-m-s (/ flow-m3-s (* pi (/ (* selected selected) 4.0)))}))
+
+(declare validate-mep-system)
+
+(defn analyze-mep-system
+  "Build the connector graph and calculate Darcy-Weisbach loss for each
+  circular segment and the complete series path."
+  [system fluid]
+  (when-let [issues (seq (validate-mep-system system))]
+    (throw (ex-info "invalid MEP system" {:issues issues})))
+  (let [flow (:mep/design-flow system)
+        connectors (mapcat :mep/connectors (:mep/segments system))
+        graph (into {} (map (fn [connector]
+                              [(:connector/id connector)
+                               (vec (keep identity [(:connector/connected-to connector)]))])
+                            connectors))
+        results
+        (mapv (fn [segment]
+                (let [[start end] (get-in segment [:geometry :directrix])
+                      length (sqrt (reduce + (map (fn [a b]
+                                                   (let [delta (- b a)] (* delta delta)))
+                                                 start end)))
+                      diameter (* 2.0 (get-in segment [:geometry :radius]))
+                      result (pressure-loss (merge fluid {:length-m length
+                                                          :diameter-m diameter
+                                                          :flow-m3-s flow}))]
+                  (assoc result :segment/id (:id segment) :segment/length-m length
+                         :segment/diameter-m diameter)))
+              (:mep/segments system))]
+    {:mep.analysis/system-id (:mep/id system) :mep.analysis/connector-graph graph
+     :mep.analysis/segments results
+     :mep.analysis/total-pressure-loss-pa (reduce + (map :mep/pressure-loss-pa results))}))
 
 (defn validate-mep-system
   "Return coordination issues for dangling segments/connectors, non-reciprocal
