@@ -333,6 +333,28 @@
       (update :placement translate-placement delta)
       (update :geometry translate-geometry (vec delta))))
 
+(defn duplicate-element
+  "Create an independent translated copy. Root/opening identities are renewed
+  and external topology links are cleared so the copy cannot alias its source."
+  ([element new-id delta]
+   (duplicate-element element new-id (str new-id) delta))
+  ([element new-id new-global-id delta]
+   (when (or (nil? new-id) (not (string? new-global-id)) (empty? new-global-id))
+     (throw (ex-info "element copy requires fresh local and global identities"
+                     {:id new-id :global-id new-global-id})))
+   (let [copy (translate-element element delta)]
+     (-> copy
+         (assoc :id new-id :global-id new-global-id :connected-to [])
+         (update :openings
+                 (fn [openings]
+                   (mapv (fn [index opening]
+                           (assoc opening :id (str new-id "-opening-" (inc index))
+                                          :filled-by nil))
+                         (range) openings)))
+         (update :mep/connectors
+                 (fn [connectors]
+                   (mapv #(assoc % :connector/connected-to nil) connectors)))))))
+
 (declare polygon-area)
 
 (defn room-space
