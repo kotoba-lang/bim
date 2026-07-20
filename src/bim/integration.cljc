@@ -111,18 +111,76 @@
          :depth (:thickness geometry)})
       geometry)))
 
+(defn- exported-property [value]
+  {:value (:value value)
+   :value-type (case (:kind value)
+                 :bool :ifcboolean :int :ifcinteger :real :ifcreal
+                 :measured (case (:unit value) :metre :ifclengthmeasure :ifcreal)
+                 :ifclabel)})
+
+(defn- exported-psets [element]
+  (into {}
+        (map (fn [[pset-name pset]]
+               [pset-name {:name pset-name
+                      :properties (into {}
+                                        (map (fn [[property-name value]]
+                                               [(clojure.core/name property-name)
+                                                (exported-property value)]))
+                                        (:props pset))}]))
+        (:psets element)))
+
+(defn- exported-opening [wall opening]
+  (let [[[x0 y0 z0] [x1 y1 _]] (get-in wall [:geometry :axis])
+        length (get-in wall [:quantities :length-m])
+        {:keys [offset sill]} (:placement opening)
+        {:keys [width height]} (:profile opening)
+        x (+ x0 (* (/ offset length) (- x1 x0)))
+        y (+ y0 (* (/ offset length) (- y1 y0)))]
+    {:id (:id opening) :global-id (str (:id opening)) :kind :opening :name "Opening"
+     :filled-by (:filled-by opening) :placement {:location [x y (+ z0 sill)]}
+     :geometry {:kind :extruded-area-solid
+                :profile {:kind :rectangle :x-dim width :y-dim (:depth opening)}
+                :direction [0.0 0.0 1.0] :depth height}}))
+
+(defn- exported-element [storey element]
+  {:id (:id element) :global-id (:global-id element)
+   :kind (:kind element) :name (:name element) :container-id (:id storey)
+   :placement (when (map? (:placement element)) (:placement element))
+   :geometry (exported-geometry element)
+   :property-sets (exported-psets element)
+   :type-object (:type-object element)
+   :openings (if (= :wall (:kind element))
+               (mapv #(exported-opening element %) (:openings element)) [])})
+
+(defn- exported-spatial-tree [project]
+  (mapv (fn [site]
+          {:id (:id site) :global-id (:global-id site) :name (:name site) :type :ifcsite
+           :placement (when (map? (:placement site)) (:placement site))
+           :children
+           (mapv (fn [building]
+                   {:id (:id building) :global-id (:global-id building) :name (:name building)
+                    :type :ifcbuilding
+                    :placement (when (map? (:placement building)) (:placement building))
+                    :children
+                    (mapv (fn [storey]
+                            {:id (:id storey) :global-id (:global-id storey) :name (:name storey)
+                             :type :ifcbuildingstorey :elevation (:elevation storey)
+                             :placement (when (map? (:placement storey)) (:placement storey))
+                             :children []})
+                          (:storeys building))})
+                 (:buildings site))})
+        (:sites project)))
+
 (defn export-ifc
   "Create a lossless, EDN-native IFC 4.3 semantic exchange document. This is
   the canonical boundary consumed by STEP/JSON adapters; it is not STEP text."
   [project]
   (ifc/exchange-document
-   {:project {:id (:id project) :name (:name project) :model project}
-    :elements (mapv (fn [element]
-                      {:id (:id element) :global-id (:global-id element)
-                       :kind (:kind element) :name (:name element)
-                       :placement (when (map? (:placement element)) (:placement element))
-                       :geometry (exported-geometry element)})
-                    (all-elements project))}))
+   {:project {:id (:id project) :global-id (str (:id project)) :name (:name project)
+              :children (exported-spatial-tree project) :model project}
+    :elements (mapv (fn [[storey element]] (exported-element storey element))
+                    (mapcat (fn [storey] (map #(vector storey %) (:elements storey)))
+                            (all-storeys project)))}))
 
 (defn import-ifc [document]
   (when-not (= "IFC4X3_ADD2" (:ifc/schema document))
@@ -162,7 +220,8 @@
          (bim/add-opening-to-wall
           host (bim/rectangular-opening {:id (:id opening) :offset offset :sill sill
                                          :width width :height height
-                                         :filled-by (:filled-by opening)}))
+                                         :filled-by (or (:filled-by-global-id opening)
+                                                        (:filled-by opening))}))
          host)))
    wall (:openings source)))
 
@@ -192,6 +251,7 @@
                         :placement (:placement source) :geometry geometry}))]
     (assoc result :global-id (:global-id source) :ifc/source-id (:id source)
                   :ifc/kind (:kind source)
+                  :type-object (:type-object source)
                   :ifc/property-sets (:property-sets source)
                   :psets (merge (:psets result) psets))))
 

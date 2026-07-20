@@ -184,7 +184,11 @@
            (get-in federation [:federation/issues 0 :issue/type])))))
 
 (deftest ifc-spf-and-svg-deliverables
-  (let [project (integrated-project)
+  (let [opening (bim/rectangular-opening {:id 20 :offset 2.0 :width 0.9 :height 2.1
+                                          :filled-by 30})
+        project (-> (integrated-project)
+                    (bim/update-element 3 10 bim/add-opening-to-wall opening)
+                    (bim/add-element 3 (bim/door {:id 30 :host-id 10 :opening-id 20})))
         spf (ifc/write-spf project)
         standard-spf (ifc/write-standard-spf project)
         standard-document (ifc/read-document standard-spf)
@@ -196,6 +200,15 @@
     (is (re-find #"IFCEXTRUDEDAREASOLID" standard-spf))
     (is (= :arbitrary-closed
            (get-in standard-document [:ifc/elements 0 :geometry :profile :kind])))
+    (is (= "Site" (get-in standard-document [:ifc/project :children 0 :name])))
+    (is (= "Tower" (get-in standard-document [:ifc/project :children 0 :children 0 :name])))
+    (is (= "Ground"
+           (get-in standard-document [:ifc/project :children 0 :children 0 :children 0 :name])))
+    (is (true? (get-in standard-document [:ifc/elements 0 :property-sets
+                                          "Pset_WallCommon" :properties "IsExternal" :value])))
+    (is (= :opening (get-in standard-document [:ifc/elements 0 :openings 0 :kind])))
+    (is (= "30" (get-in standard-document
+                         [:ifc/elements 0 :openings 0 :filled-by-global-id])))
     (is (re-find #"<svg" svg))
     (is (re-find #"<line" svg))))
 
