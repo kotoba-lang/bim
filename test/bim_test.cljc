@@ -295,6 +295,44 @@
                           (integration/instantiate-family-type catalog "cabinet" :wide 71
                                                                {:width 1.5})))))
 
+(deftest reference-plane-constraints-drive-family-geometry
+  (let [family (integration/family-definition
+                {:id "window-double" :name "Double Window" :category :window
+                 :parameters {:width {:type :length :default 1.2 :min 0.4}
+                              :height {:type :length :default 1.5 :min 0.4}
+                              :mullion-offset {:type :length :default 0.0}}
+                 :reference-planes
+                 {:left {:axis :x :offset 0.0 :locked true}
+                  :right {:axis :x :offset [:+ [:reference :left] [:param :width]]}
+                  :mullion {:axis :x :offset [:+ [:reference :left]
+                                               [:/ [:param :width] 2.0]]}
+                  :sill {:axis :z :offset [:param :mullion-offset]}
+                  :head {:axis :z :offset [:+ [:reference :sill] [:param :height]]}}
+                 :constraints
+                 [{:kind :distance :from :left :to :right :value [:param :width]}
+                  {:kind :distance :from :left :to :mullion
+                   :value [:/ [:param :width] 2.0]}
+                  {:kind :distance :from :sill :to :head :value [:param :height]}]
+                 :template
+                 {:kind :window :name "Double Window"
+                  :geometry {:kind :extruded-area-solid
+                             :profile {:kind :rectangle
+                                       :x-dim [:- [:reference :right] [:reference :left]]
+                                       :y-dim 0.12}
+                             :position {:location [[:reference :left] 0.0 [:reference :sill]]}
+                             :direction [0.0 0.0 1.0]
+                             :depth [:- [:reference :head] [:reference :sill]]}
+                  :mullion {:x [:reference :mullion]}}})
+        instance (integration/instantiate-family family 80 {:width 1.8 :height 2.0
+                                                            :mullion-offset 0.3})]
+    (is (= 1.8 (get-in instance [:geometry :profile :x-dim])))
+    (is (< (#?(:clj Math/abs :cljs js/Math.abs)
+            (- 2.0 (get-in instance [:geometry :depth])))
+           1.0e-9))
+    (is (= [0.0 0.0 0.3] (get-in instance [:geometry :position :location])))
+    (is (= 0.9 (get-in instance [:mullion :x])))
+    (is (= 2.3 (get-in instance [:family/reference-planes :head :offset])))))
+
 (deftest rejects-family-formula-and-nesting-cycles
   (let [formula-cycle (integration/family-definition
                        {:id "cycle" :parameters {}

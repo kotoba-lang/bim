@@ -16,9 +16,10 @@
 (defn- round [value] (#?(:clj Math/round :cljs js/Math.round) value))
 
 (defn family-definition
-  [{:keys [id name category parameters formulas constraints types template]}]
+  [{:keys [id name category parameters formulas reference-planes constraints types template]}]
   {:family/id id :family/name name :family/category category
    :family/parameters (or parameters {}) :family/formulas (or formulas {})
+   :family/reference-planes (or reference-planes {})
    :family/constraints (vec constraints) :family/types (or types {})
    :family/template template :family/schema-version schema-version})
 
@@ -69,7 +70,57 @@
                       {:parameter name :maximum (:max spec) :value value})))
     value))
 
-(defn- validate-constraints! [family params]
+(defn- layout-expression-dependencies [expression]
+  (cond
+    (and (vector? expression) (= :reference (first expression))) #{(second expression)}
+    (coll? expression) (into #{} (mapcat layout-expression-dependencies expression))
+    :else #{}))
+
+(defn- eval-layout-expression [params planes expression]
+  (cond
+    (and (vector? expression) (= :reference (first expression)))
+    (get-in planes [(second expression) :offset])
+
+    (vector? expression)
+    (let [[op & operands] expression
+          values (map #(eval-layout-expression params planes %) operands)]
+      (case op
+        :param (get params (first operands))
+        :+ (reduce + values)
+        :- (reduce - values)
+        :* (reduce * values)
+        :/ (reduce / values)
+        :min (reduce min values)
+        :max (reduce max values)
+        (throw (ex-info "unsupported family layout expression" {:expression expression}))))
+
+    :else expression))
+
+(defn resolve-reference-planes
+  "Resolve named datum planes in dependency order. Plane offsets may reference
+  parameters or already resolved planes, allowing dimensions to drive geometry."
+  [family params]
+  (loop [resolved {} pending (:family/reference-planes family)]
+    (if (empty? pending)
+      resolved
+      (let [ready (into {}
+                        (filter (fn [[_ plane]]
+                                  (every? #(contains? resolved %)
+                                          (layout-expression-dependencies (:offset plane)))))
+                        pending)]
+        (when (empty? ready)
+          (throw (ex-info "reference plane dependency cycle or missing plane"
+                          {:pending (keys pending)})))
+        (recur (reduce-kv (fn [planes name plane]
+                            (let [offset (eval-layout-expression params planes (:offset plane))]
+                              (when-not (number? offset)
+                                (throw (ex-info "reference plane offset must be numeric"
+                                                {:plane name :offset offset})))
+                              (assoc planes name (assoc plane :name name :offset offset))))
+                          resolved ready)
+               (apply dissoc pending (keys ready)))))))
+
+(defn- validate-constraints! [family params planes]
   (doseq [constraint (:family/constraints family)]
     (case (:kind constraint)
       :equal (let [left (eval-expr params (:left constraint))
@@ -83,8 +134,24 @@
                          (and (number? (:max constraint)) (> value (:max constraint))))
                  (throw (ex-info "family range constraint failed"
                                  {:constraint constraint :value value}))))
+      :distance (let [from (get-in planes [(:from constraint) :offset])
+                      to (get-in planes [(:to constraint) :offset])
+                      expected (eval-layout-expression params planes (:value constraint))
+                      actual (when (and (number? from) (number? to))
+                               (math-abs (- to from)))
+                      tolerance (or (:tolerance constraint) 1.0e-9)]
+                  (when (or (nil? actual) (not (number? expected))
+                            (> (math-abs (- actual expected)) tolerance))
+                    (throw (ex-info "family distance constraint failed"
+                                    {:constraint constraint :actual actual :expected expected}))))
+      :coincident (let [left (get-in planes [(:left constraint) :offset])
+                        right (get-in planes [(:right constraint) :offset])
+                        tolerance (or (:tolerance constraint) 1.0e-9)]
+                    (when (or (nil? left) (nil? right) (> (math-abs (- left right)) tolerance))
+                      (throw (ex-info "family coincident constraint failed"
+                                      {:constraint constraint :left left :right right}))))
       (throw (ex-info "unsupported family constraint" {:constraint constraint}))))
-  params)
+  {:parameters params :reference-planes planes})
 
 (defn resolve-family-parameters
   "Resolve defaults and overrides, then formulas by dependency order. Cycles,
@@ -119,7 +186,8 @@
                         (apply dissoc pending (keys ready))))))]
        (doseq [[name spec] specs]
          (validate-parameter! name spec (get params name)))
-       (validate-constraints! family params)))))
+       (let [planes (resolve-reference-planes family params)]
+         (:parameters (validate-constraints! family params planes)))))))
 
 (declare instantiate-family*)
 
@@ -140,15 +208,24 @@
 
 (defn- instantiate-family* [catalog family type-key instance-id overrides stack]
   (let [params (resolve-family-parameters family type-key overrides (some? catalog))
-        substituted (walk/postwalk #(if (and (vector? %) (= :param (first %)))
-                                      (get params (second %)) %)
+        planes (resolve-reference-planes family params)
+        substituted (walk/postwalk #(cond
+                                      (and (vector? %) (= :param (first %)))
+                                      (get params (second %))
+                                      (and (vector? %) (= :reference (first %)))
+                                      (get-in planes [(second %) :offset])
+                                      (and (vector? %) (contains? #{:+ :- :* :/ :min :max}
+                                                                  (first %)))
+                                      (eval-expr {} %)
+                                      :else %)
                                    (:family/template family))
         body (if catalog (materialize-template catalog substituted stack) substituted)
         type-spec (get-in family [:family/types type-key])]
     (cond-> (assoc body :id instance-id
                         :family/id (:family/id family)
                         :family/type type-key
-                        :family/parameters params)
+                        :family/parameters params
+                        :family/reference-planes planes)
       type-spec (assoc :type-object
                        {:id (or (:id type-spec) (str (:family/id family) ":" (name type-key)))
                         :global-id (:global-id type-spec)
