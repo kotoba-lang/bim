@@ -1558,4 +1558,24 @@
                     {:kind :extruded-area-solid :depth 2.0} [1.0 2.0 3.0])
                    [:position :location])))
     (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
-                 (bim/translate-element wall [1.0 2.0])))))
+                 (bim/translate-element wall [1.0 2.0])))
+    (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+                 (bim/translate-element wall [##NaN 0.0 0.0])))))
+
+(deftest element-duplication-renews-identities-and-detaches-topology
+  (let [source (-> (bim/wall {:id 10 :start [0 0 0] :end [4 0 0]})
+                   (assoc :global-id "source-guid" :connected-to [20]
+                          :openings [{:id 30 :filled-by 31 :placement {:offset 1.0}}]
+                          :mep/connectors [{:connector/id :a
+                                            :connector/connected-to :remote}]))
+        copy (bim/duplicate-element source 40 "copy-guid" [1.0 2.0 0.0])]
+    (is (= 40 (:id copy)))
+    (is (= "copy-guid" (:global-id copy)))
+    (is (= [[1.0 2.0 0.0] [5.0 2.0 0.0]] (get-in copy [:geometry :axis])))
+    (is (= [] (:connected-to copy)))
+    (is (= "40-opening-1" (get-in copy [:openings 0 :id])))
+    (is (nil? (get-in copy [:openings 0 :filled-by])))
+    (is (nil? (get-in copy [:mep/connectors 0 :connector/connected-to])))
+    (is (= "source-guid" (:global-id source)))
+    (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+                 (bim/duplicate-element source 40 "" [0 0 0])))))
