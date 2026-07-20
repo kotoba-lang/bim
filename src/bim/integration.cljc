@@ -152,9 +152,31 @@
    :openings (if (= :wall (:kind element))
                (mapv #(exported-opening element %) (:openings element)) [])})
 
+(defn- decimal-degrees->compound [value]
+  (when (number? value)
+    (let [absolute (#?(:clj Math/abs :cljs js/Math.abs) value)
+          degrees (#?(:clj Math/floor :cljs js/Math.floor) absolute)
+          minutes-value (* 60.0 (- absolute degrees))
+          minutes (#?(:clj Math/floor :cljs js/Math.floor) minutes-value)
+          seconds-value (* 60.0 (- minutes-value minutes))
+          seconds (#?(:clj Math/floor :cljs js/Math.floor) seconds-value)
+          millionths (#?(:clj Math/round :cljs js/Math.round) (* 1.0e6 (- seconds-value seconds)))]
+      [(long (* (if (neg? value) -1 1) degrees)) (long minutes)
+       (long seconds) (long millionths)])))
+
+(defn- compound->decimal-degrees [compound]
+  (when (seq compound)
+    (let [[degrees minutes seconds millionths] compound
+          sign (if (neg? degrees) -1.0 1.0)]
+      (* sign (+ (#?(:clj Math/abs :cljs js/Math.abs) degrees)
+                 (/ minutes 60.0) (/ (+ seconds (/ (or millionths 0) 1.0e6)) 3600.0))))))
+
 (defn- exported-spatial-tree [project]
   (mapv (fn [site]
           {:id (:id site) :global-id (:global-id site) :name (:name site) :type :ifcsite
+           :latitude (decimal-degrees->compound (get-in site [:geo :latitude-deg]))
+           :longitude (decimal-degrees->compound (get-in site [:geo :longitude-deg]))
+           :elevation (get-in site [:geo :elevation-m])
            :placement (when (map? (:placement site)) (:placement site))
            :children
            (mapv (fn [building]
@@ -177,6 +199,7 @@
   [project]
   (ifc/exchange-document
    {:project {:id (:id project) :global-id (str (:id project)) :name (:name project)
+              :georeference (or (:ifc/georeference project) (:georeference project))
               :children (exported-spatial-tree project) :model project}
     :elements (mapv (fn [[storey element]] (exported-element storey element))
                     (mapcat (fn [storey] (map #(vector storey %) (:elements storey)))
@@ -290,12 +313,24 @@
                                                                 (filter (comp #{:ifcbuildingstorey} :type)
                                                                         (:children node)))}))
                                 buildings)
-          site-node (first sites)]
+          site-node (first sites)
+          georeference (:ifc/georeference document)
+          true-north (:true-north georeference)
+          true-north-rad (if (seq true-north)
+                           (#?(:clj Math/atan2 :cljs js/Math.atan2)
+                            (first true-north) (second true-north)) 0.0)]
       {:id (or (:global-id root) (:id root)) :name (:name root) :description ""
-       :units (imported-unit-system document) :world-origin [0.0 0.0 0.0] :true-north-rad 0.0
+       :units (imported-unit-system document)
+       :world-origin (or (:world-origin georeference) [0.0 0.0 0.0])
+       :true-north-rad true-north-rad :ifc/georeference georeference
        :psets {}
        :sites [(bim/site {:id (or (:id site-node) 1) :name (or (:name site-node) "Site")
-                          :geo nil :placement (:placement site-node)
+                          :geo (when site-node
+                                 (bim/geo-ref
+                                  (compound->decimal-degrees (:latitude site-node))
+                                  (compound->decimal-degrees (:longitude site-node))
+                                  (:elevation site-node)))
+                          :placement (:placement site-node)
                           :buildings building-models})]})))
 
 (defn import-ifc-spf [text]

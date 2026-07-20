@@ -240,11 +240,19 @@
   (let [opening (bim/rectangular-opening {:id 20 :offset 2.0 :width 0.9 :height 2.1
                                           :filled-by 30})
         project (-> (integrated-project)
+                    (assoc :ifc/georeference
+                           {:projected-crs {:name "EPSG:6677" :geodetic-datum "JGD2011"}
+                            :world-origin [100.0 200.0 0.0] :true-north [0.0 1.0]
+                            :eastings 500000.0 :northings 3950000.0
+                            :orthogonal-height 42.5 :x-axis-abscissa 1.0
+                            :x-axis-ordinate 0.0 :scale 1.0})
+                    (assoc-in [:sites 0 :geo] (bim/geo-ref 35.6666667 139.75 42.5))
                     (bim/update-element 3 10 bim/add-opening-to-wall opening)
                     (bim/add-element 3 (bim/door {:id 30 :host-id 10 :opening-id 20})))
         spf (ifc/write-spf project)
         standard-spf (ifc/write-standard-spf project)
         standard-document (ifc/read-document standard-spf)
+        imported-project (integration/import-external-ifc standard-document)
         svg (drawing/floor-plan-svg (bim/find-storey project 3))]
     (is (.startsWith spf "ISO-10303-21;"))
     (is (re-find #"IFCWALL" spf))
@@ -262,6 +270,15 @@
     (is (= :opening (get-in standard-document [:ifc/elements 0 :openings 0 :kind])))
     (is (= "30" (get-in standard-document
                          [:ifc/elements 0 :openings 0 :filled-by-global-id])))
+    (is (= "EPSG:6677" (get-in standard-document
+                                [:ifc/georeference :projected-crs :name])))
+    (is (= [100.0 200.0 0.0] (:world-origin imported-project)))
+    (is (= 0.0 (:true-north-rad imported-project)))
+    (is (< (#?(:clj Math/abs :cljs js/Math.abs)
+            (- 35.6666667 (get-in imported-project [:sites 0 :geo :latitude-deg])))
+           1.0e-6))
+    (is (= 139.75 (get-in imported-project [:sites 0 :geo :longitude-deg])))
+    (is (= 42.5 (get-in imported-project [:sites 0 :geo :elevation-m])))
     (is (re-find #"<svg" svg))
     (is (re-find #"<line" svg))))
 
