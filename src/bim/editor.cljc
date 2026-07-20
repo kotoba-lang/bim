@@ -97,6 +97,9 @@
                                      selection ids)
                      (throw (ex-info "unsupported selection mode" {:mode mode}))))))))
 
+(defn- snap-distance-rank [distance]
+  (#?(:clj Math/round :cljs js/Math.round) (/ distance 1.0e-9)))
+
 (defn snap-point
   "Return the nearest endpoint/midpoint/intersection/grid candidate in tolerance."
   [point candidates {:keys [grid tolerance] :or {tolerance 0.15}}]
@@ -109,8 +112,11 @@
                    (#?(:clj Math/sqrt :cljs js/Math.sqrt)
                     (reduce + (map (fn [a b] (let [delta (- a b)] (* delta delta)))
                                    point (:snap/point candidate)))))
-        ranked (sort-by (juxt distance #(case (:snap/kind %) :endpoint 0 :intersection 1
-                                                :midpoint 2 :grid 3 4)) candidates)
+        ranked (sort-by (juxt #(snap-distance-rank (distance %))
+                              #(case (:snap/kind %) :endpoint 0 :intersection 1
+                                     :midpoint 2 :grid 3 4)
+                              distance)
+                        candidates)
         winner (first ranked)]
     (when (and winner (= dimension (count (:snap/point winner)))
                (<= (distance winner) tolerance))
@@ -254,17 +260,17 @@
         (keep (fn [source]
                 (let [proposed (mapv + (:snap/point source) delta)]
                   (when-let [target (snap-point proposed target-candidates options)]
-                    (let [correction (mapv - (:snap/point target) proposed)]
-                      {:snap/kind (:snap/kind target)
+                    {:snap/kind (:snap/kind target)
                        :snap/source-point (:snap/point source)
                        :snap/target-point (:snap/point target)
                        :snap/distance (:snap/distance target)
-                       :snap/delta (mapv + delta correction)
+                       :snap/delta (mapv - (:snap/point target) (:snap/point source))
                        :snap/target-element (:element/id target)
-                       :snap/target-elements (:element/ids target)}))))
+                       :snap/target-elements (:element/ids target)})))
               source-candidates)]
-    (first (sort-by (juxt :snap/distance
+    (first (sort-by (juxt #(snap-distance-rank (:snap/distance %))
                           #(case (:snap/kind %) :endpoint 0 :intersection 1
                                  :midpoint 2 :grid 3 4)
+                          :snap/distance
                           :snap/source-point)
                     attempts))))
