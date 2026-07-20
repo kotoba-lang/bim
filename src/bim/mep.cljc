@@ -63,6 +63,71 @@
      [(get-in segments [0 :mep/connectors 0])
       (get-in segments [(dec segment-count) :mep/connectors 1])]}))
 
+(defn rectangular-route-assembly
+  "Turn a routed path into rectangular duct segments and semantic elbows.
+  Connector size is the stable `[width height]` cross-section tuple."
+  [{:keys [id system-id domain width height points bend-radius]}]
+  (when-not (and id system-id domain (number? width) (pos? width)
+                 (number? height) (pos? height) (<= 2 (count points))
+                 (every? #(and (= 3 (count %)) (every? number? %)) points))
+    (throw (ex-info "rectangular MEP route requires identity, size, and 3D points"
+                    {:id id :width width :height height :points points})))
+  (let [points (mapv vec points)
+        segment-count (dec (count points))
+        size [width height]
+        fittings
+        (mapv (fn [index]
+                (let [point (nth points index)
+                      incoming (normalize (subtract (nth points (dec index)) point))
+                      outgoing (normalize (subtract (nth points (inc index)) point))
+                      angle (* (/ 180.0 pi)
+                               (acos (max -1.0 (min 1.0 (dot incoming outgoing)))))]
+                  {:id (str id "-elbow-" index) :kind :flow-fitting
+                   :mep/fitting-kind :elbow :mep/system-id system-id
+                   :mep/angle-deg angle
+                   :mep/bend-radius (or bend-radius (* 1.5 (max width height)))
+                   :mep/connectors
+                   [{:connector/id (str id "-f" index "-in")
+                     :connector/point point :connector/domain domain
+                     :connector/shape :rectangular :connector/size size
+                     :connector/flow-direction :in
+                     :connector/connected-to (str id "-s" (dec index) "-end")}
+                    {:connector/id (str id "-f" index "-out")
+                     :connector/point point :connector/domain domain
+                     :connector/shape :rectangular :connector/size size
+                     :connector/flow-direction :out
+                     :connector/connected-to (str id "-s" index "-start")}]}))
+              (range 1 segment-count))
+        segments
+        (mapv (fn [index]
+                (let [start (nth points index) end (nth points (inc index))
+                      axis (subtract end start) length (magnitude axis)]
+                  {:id (str id "-segment-" index) :kind :mep-segment
+                   :mep/kind :duct :mep/system-id system-id :mep/domain domain
+                   :mep/shape :rectangular :mep/width width :mep/height height
+                   :geometry {:kind :extruded-area-solid
+                              :profile {:kind :rectangle :x-dim width :y-dim height}
+                              :position {:location start} :direction axis :depth length}
+                   :mep/connectors
+                   [{:connector/id (str id "-s" index "-start")
+                     :connector/point start :connector/domain domain
+                     :connector/shape :rectangular :connector/size size
+                     :connector/flow-direction :in
+                     :connector/connected-to (when (pos? index)
+                                               (str id "-f" index "-out"))}
+                    {:connector/id (str id "-s" index "-end")
+                     :connector/point end :connector/domain domain
+                     :connector/shape :rectangular :connector/size size
+                     :connector/flow-direction :out
+                     :connector/connected-to (when (< index (dec segment-count))
+                                               (str id "-f" (inc index) "-in"))}]}))
+              (range segment-count))]
+    {:mep.assembly/id id :mep.assembly/system-id system-id
+     :mep.assembly/segments segments :mep.assembly/fittings fittings
+     :mep.assembly/open-connectors
+     [(get-in segments [0 :mep/connectors 0])
+      (get-in segments [(dec segment-count) :mep/connectors 1])]}))
+
 (defn network-assembly
   "Generate connected round segments plus elbow, reducer, tee, cross, or
   manifold fittings from an arbitrary node/edge route graph. Edge order is

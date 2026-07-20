@@ -2748,6 +2748,58 @@
     {:mep/required-diameter-m required :mep/diameter-m selected
      :mep/velocity-m-s (/ flow-m3-s (* pi (/ (* selected selected) 4.0)))}))
 
+(defn size-rectangular-duct
+  "Select the smallest catalogued rectangular duct that satisfies velocity."
+  [flow-m3-s max-velocity-m-s available-sizes-m]
+  (when-not (and (number? flow-m3-s) (pos? flow-m3-s)
+                 (number? max-velocity-m-s) (pos? max-velocity-m-s))
+    (throw (ex-info "duct flow and maximum velocity must be positive"
+                    {:flow-m3-s flow-m3-s :max-velocity-m-s max-velocity-m-s})))
+  (let [valid (filter (fn [[width height]]
+                        (and (number? width) (pos? width)
+                             (number? height) (pos? height)))
+                      available-sizes-m)
+        required-area (/ flow-m3-s max-velocity-m-s)
+        [width height :as selected]
+        (first (sort-by (fn [[w h]] [(* w h) (max w h) (min w h)])
+                        (filter (fn [[w h]] (>= (* w h) required-area)) valid)))]
+    (when-not selected
+      (throw (ex-info "no available rectangular duct satisfies velocity limit"
+                      {:required-area-m2 required-area :available available-sizes-m})))
+    (let [area (* width height)]
+      {:mep/required-area-m2 required-area :mep/width-m width :mep/height-m height
+       :mep/area-m2 area :mep/hydraulic-diameter-m (/ (* 2.0 width height)
+                                                       (+ width height))
+       :mep/velocity-m-s (/ flow-m3-s area)})))
+
+(defn rectangular-duct-pressure-loss
+  "Darcy-Weisbach loss for a rectangular duct using hydraulic diameter."
+  [{:keys [length-m width-m height-m roughness-m flow-m3-s density-kg-m3
+           viscosity-pa-s minor-loss-coefficient]
+    :or {minor-loss-coefficient 0.0}}]
+  (when-not (every? #(and (number? %) (pos? %))
+                    [length-m width-m height-m roughness-m flow-m3-s
+                     density-kg-m3 viscosity-pa-s])
+    (throw (ex-info "rectangular duct inputs must be positive"
+                    {:length-m length-m :width-m width-m :height-m height-m
+                     :flow-m3-s flow-m3-s})))
+  (let [area (* width-m height-m)
+        hydraulic-diameter (/ (* 2.0 width-m height-m) (+ width-m height-m))
+        velocity (/ flow-m3-s area)
+        reynolds (/ (* density-kg-m3 velocity hydraulic-diameter) viscosity-pa-s)
+        friction (if (< reynolds 2300.0) (/ 64.0 reynolds)
+                     (/ 0.25 (pow
+                              (log10 (+ (/ roughness-m (* 3.7 hydraulic-diameter))
+                                        (/ 5.74 (pow reynolds 0.9)))) 2.0)))
+        velocity-pressure (/ (* density-kg-m3 velocity velocity) 2.0)
+        friction-loss (* friction (/ length-m hydraulic-diameter) velocity-pressure)
+        minor-loss (* minor-loss-coefficient velocity-pressure)]
+    {:mep/reynolds reynolds :mep/friction-factor friction
+     :mep/velocity-m-s velocity :mep/hydraulic-diameter-m hydraulic-diameter
+     :mep/friction-pressure-loss-pa friction-loss
+     :mep/minor-pressure-loss-pa minor-loss
+     :mep/pressure-loss-pa (+ friction-loss minor-loss)}))
+
 (defn size-and-balance-mep-network
   "Size a directed tree network from terminal demands, calculate segment
   Darcy-Weisbach losses, identify the critical path, and report balancing
