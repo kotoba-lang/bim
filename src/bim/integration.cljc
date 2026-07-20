@@ -266,7 +266,8 @@
 (defn resolve-reference-planes
   "Resolve named datum planes in dependency order. Plane offsets may reference
   parameters or already resolved planes. Distance and coincident constraints
-  can solve a plane whose offset is intentionally left unspecified."
+  can solve a plane whose offset is intentionally left unspecified. Fixed,
+  midpoint, and equal-spacing constraints support Revit-style datum layouts."
   [family params]
   (loop [resolved {} pending (:family/reference-planes family)]
     (if (empty? pending)
@@ -295,6 +296,7 @@
                          (case kind
                            :distance [(:from constraint) (:to constraint)]
                            :coincident [(:left constraint) (:right constraint)]
+                           :midpoint [(:left constraint) (:right constraint)]
                            [nil nil])
                          left (get-in resolved [left-name :offset])
                          right (get-in resolved [right-name :offset])
@@ -305,6 +307,12 @@
                                     (eval-layout-expression params resolved expression))
                          direction (or (:direction constraint) 1.0)]
                      (cond
+                       (and (= :fixed kind) (contains? pending (:plane constraint)))
+                       (let [value (eval-layout-expression params resolved (:value constraint))]
+                         (if (number? value)
+                           (assoc result (:plane constraint) value)
+                           result))
+
                        (and (= :distance kind) (number? distance) (number? left)
                             (contains? pending right-name))
                        (assoc result right-name (+ left (* direction distance)))
@@ -320,6 +328,39 @@
                        (and (= :coincident kind) (number? right)
                             (contains? pending left-name))
                        (assoc result left-name right)
+
+                       (and (= :midpoint kind) (number? left) (number? right)
+                            (contains? pending (:target constraint)))
+                       (assoc result (:target constraint) (/ (+ left right) 2.0))
+
+                       (and (= :midpoint kind)
+                            (number? (get-in resolved [(:target constraint) :offset]))
+                            (number? left) (contains? pending right-name))
+                       (assoc result right-name
+                              (- (* 2.0 (get-in resolved [(:target constraint) :offset])) left))
+
+                       (and (= :midpoint kind)
+                            (number? (get-in resolved [(:target constraint) :offset]))
+                            (number? right) (contains? pending left-name))
+                       (assoc result left-name
+                              (- (* 2.0 (get-in resolved [(:target constraint) :offset])) right))
+
+                       (= :equal-spacing kind)
+                       (let [names (vec (:planes constraint))
+                             last-index (dec (count names))
+                             offset-a (get-in resolved [(first names) :offset])
+                             offset-b (get-in resolved [(peek names) :offset])]
+                         (if (and (>= (count names) 3)
+                                  (number? offset-a) (number? offset-b))
+                           (let [step (/ (- offset-b offset-a) last-index)]
+                             (reduce-kv
+                              (fn [solutions index name]
+                                (if (contains? pending name)
+                                  (assoc solutions name
+                                         (+ offset-a (* index step)))
+                                  solutions))
+                              result names))
+                           result))
 
                        :else result)))
                  {} (:family/constraints family))]
@@ -363,6 +404,31 @@
                     (when (or (nil? left) (nil? right) (> (math-abs (- left right)) tolerance))
                       (throw (ex-info "family coincident constraint failed"
                                       {:constraint constraint :left left :right right}))))
+      :fixed (let [actual (get-in planes [(:plane constraint) :offset])
+                   expected (eval-layout-expression params planes (:value constraint))
+                   tolerance (or (:tolerance constraint) 1.0e-9)]
+               (when (or (not (number? actual)) (not (number? expected))
+                         (> (math-abs (- actual expected)) tolerance))
+                 (throw (ex-info "family fixed constraint failed"
+                                 {:constraint constraint :actual actual :expected expected}))))
+      :midpoint (let [left (get-in planes [(:left constraint) :offset])
+                      right (get-in planes [(:right constraint) :offset])
+                      target (get-in planes [(:target constraint) :offset])
+                      expected (/ (+ left right) 2.0)
+                      tolerance (or (:tolerance constraint) 1.0e-9)]
+                  (when (> (math-abs (- target expected)) tolerance)
+                    (throw (ex-info "family midpoint constraint failed"
+                                    {:constraint constraint :actual target
+                                     :expected expected}))))
+      :equal-spacing
+      (let [offsets (mapv #(get-in planes [% :offset]) (:planes constraint))
+            intervals (mapv - (rest offsets) offsets)
+            tolerance (or (:tolerance constraint) 1.0e-9)]
+        (when (or (< (count offsets) 3) (some #(not (number? %)) offsets)
+                  (some #(> (math-abs (- % (first intervals))) tolerance)
+                        (rest intervals)))
+          (throw (ex-info "family equal-spacing constraint failed"
+                          {:constraint constraint :offsets offsets}))))
       (throw (ex-info "unsupported family constraint" {:constraint constraint}))))
   {:parameters params :reference-planes planes})
 

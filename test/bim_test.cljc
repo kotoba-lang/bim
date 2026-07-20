@@ -471,6 +471,36 @@
            (get-in instance [:family/reference-planes :origin-copy :offset])))
     (is (= 2.3 (get-in instance [:family/reference-planes :head :offset])))))
 
+(deftest fixed-midpoint-and-equal-spacing-solve-reference-planes
+  (let [family (integration/family-definition
+                {:id "arrayed-panel" :name "Arrayed Panel" :category :generic-model
+                 :parameters {:width {:type :length :default 4.0}}
+                 :reference-planes {:left {:axis :x}
+                                    :quarter {:axis :x}
+                                    :center {:axis :x}
+                                    :three-quarter {:axis :x}
+                                    :right {:axis :x :offset [:param :width]}}
+                 :constraints [{:kind :fixed :plane :left :value 0.0}
+                               {:kind :midpoint :left :left :right :right :target :center}
+                               {:kind :equal-spacing
+                                :planes [:left :quarter :center :three-quarter :right]}]
+                 :template {:kind :proxy :name "Arrayed Panel"
+                            :stations [[:reference :left] [:reference :quarter]
+                                       [:reference :center] [:reference :three-quarter]
+                                       [:reference :right]]}})
+        instance (integration/instantiate-family family 81 {:width 6.0})]
+    (is (= [0.0 1.5 3.0 4.5 6.0] (:stations instance)))
+    (is (= :constraint
+           (get-in instance [:family/reference-planes :left :solved-by])))
+    (is (= :constraint
+           (get-in instance [:family/reference-planes :center :solved-by])))
+    (is (thrown-with-msg?
+         #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+         #"equal-spacing"
+         (integration/instantiate-family
+          (assoc-in family [:family/reference-planes :quarter :offset] 1.0)
+          82 {:width 6.0})))))
+
 (deftest hosted-family-sketch-and-void-cut
   (let [family (integration/family-definition
                 {:id "hosted-window" :name "Hosted Window" :category :window
