@@ -15,6 +15,19 @@
                              :connector/connected-to])))
     (is (= 2 (count (:mep.assembly/open-connectors assembly))))))
 
+(deftest rectangular-route-assembly-preserves-duct-cross-section
+  (let [assembly (mep/rectangular-route-assembly
+                  {:id "SA" :system-id :supply-air :domain :hvac
+                   :width 0.6 :height 0.3
+                   :points [[0 0 3] [3 0 3] [3 2 3]]})]
+    (is (= 2 (count (:mep.assembly/segments assembly))))
+    (is (= :rectangular
+           (get-in assembly [:mep.assembly/segments 0 :mep/shape])))
+    (is (= [0.6 0.3]
+           (get-in assembly [:mep.assembly/fittings 0 :mep/connectors 0
+                             :connector/size])))
+    (is (= :elbow (get-in assembly [:mep.assembly/fittings 0 :mep/fitting-kind])))))
+
 (deftest network-assembly-generates-elbows-tees-and-reducers
   (let [assembly
         (mep/network-assembly

@@ -1044,6 +1044,22 @@
     (is (= :tee (get-in assembly [:mep.assembly/fittings 0 :mep/fitting-kind])))
     (is (empty? (integration/validate-mep-system system)))))
 
+(deftest sizes-and-calculates-rectangular-duct-pressure-loss
+  (let [sizing (integration/size-rectangular-duct
+                1.2 6.0 [[0.3 0.2] [0.4 0.25] [0.5 0.4] [0.6 0.4]])
+        loss (integration/rectangular-duct-pressure-loss
+              {:length-m 20.0 :width-m (:mep/width-m sizing)
+               :height-m (:mep/height-m sizing) :roughness-m 9.0e-5
+               :flow-m3-s 1.2 :density-kg-m3 1.204 :viscosity-pa-s 1.81e-5
+               :minor-loss-coefficient 1.2})]
+    (is (= [0.5 0.4] [(:mep/width-m sizing) (:mep/height-m sizing)]))
+    (is (< (#?(:clj Math/abs :cljs js/Math.abs)
+            (- 6.0 (:mep/velocity-m-s sizing))) 1.0e-9))
+    (is (> (:mep/hydraulic-diameter-m loss) 0.4))
+    (is (pos? (:mep/pressure-loss-pa loss)))
+    (is (thrown? #?(:clj Exception :cljs js/Error)
+                 (integration/size-rectangular-duct 3.0 2.0 [[0.5 0.5]])))))
+
 (deftest owns-and-atomically-connects-mep-equipment-connectors
   (let [pump-connector (integration/mep-connector
                         {:id :pump-out :point [1 0 0] :direction [1 0 0]
