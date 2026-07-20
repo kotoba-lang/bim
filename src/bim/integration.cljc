@@ -4,7 +4,8 @@
   (:require [clojure.walk :as walk]
             [bim :as bim]
             [ifc.core :as ifc]
-            [kotoba.document.change :as document-change]))
+            [kotoba.document.change :as document-change]
+            [kotoba.document.collaboration :as collaboration]))
 
 (def schema-version 1)
 (def ^:private pi #?(:clj Math/PI :cljs js/Math.PI))
@@ -760,6 +761,50 @@
 
 (defn merge-events [document events]
   (document-change/replay document events))
+
+(defn collaboration-workspace [project]
+  (collaboration/workspace {:id (:id project) :document project :default-branch :main}))
+
+(defn create-design-branch [workspace branch-id from-revision]
+  (collaboration/branch workspace branch-id from-revision))
+
+(defn commit-design-revision [workspace revision]
+  (collaboration/commit workspace revision))
+
+(defn review-design-revision [workspace review]
+  (collaboration/review workspace review))
+
+(defn merge-design-branches [workspace merge-request]
+  (collaboration/merge-branches workspace merge-request))
+
+(defn resolve-design-merge [merge-result resolution]
+  (collaboration/resolve-merge merge-result resolution))
+
+(defn create-coordination-issue [workspace issue]
+  (collaboration/create-issue workspace issue))
+
+(defn transition-coordination-issue [workspace issue-id status actor clock comment]
+  (collaboration/transition-issue workspace issue-id status actor clock comment))
+
+(defn collaboration-checkpoint [workspace peer-id]
+  (collaboration/checkpoint workspace peer-id))
+
+(declare cloud-itonami-payload)
+(defn cloud-itonami-sync-payload
+  "Create an incremental, replayable cloud-itonami collaboration envelope."
+  [workspace checkpoint]
+  (let [delta (collaboration/changes-since workspace checkpoint)
+        default-branch (:collab/default-branch workspace)
+        head (collaboration/branch-head workspace default-branch)
+        project (:revision/document (collaboration/revision workspace head))]
+    {:itonami/event :design/collaboration-synchronized
+     :itonami/contract-version schema-version
+     :design/project-id (:id project) :design/project-name (:name project)
+     :design/head-revision head :design/branches (:sync/branches delta)
+     :design/revisions (:sync/revisions delta)
+     :coordination/issues (:sync/issues delta)
+     :coordination/reviews (:sync/reviews delta)
+     :design/line-items (:design/line-items (cloud-itonami-payload project head))}))
 
 (defn cloud-itonami-payload
   "Project quantities and classifications into a versioned cloud-itonami

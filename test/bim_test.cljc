@@ -330,6 +330,45 @@
     (is (= "Ss_25_10" (get-in payload [:design/line-items 0 :classification/code])))
     (is (= 7 (:design/revision payload)))))
 
+(deftest collaboration-review-issue-and-cloud-itonami-delta
+  (let [project (integrated-project)
+        initial (integration/collaboration-workspace project)
+        checkpoint (integration/collaboration-checkpoint initial "cloud-itonami")
+        branched (integration/create-design-branch initial :architecture "root")
+        event-main (integration/change-event {:id "main-name" :actor "lead" :clock 1
+                                               :operation :assoc :path [:description]
+                                               :value "Coordinated"})
+        event-arch (integration/change-event {:id "arch-name" :actor "architect" :clock 2
+                                               :operation :assoc :path [:name]
+                                               :value "Integrated Tower A"})
+        main (integration/commit-design-revision
+              branched {:id "main-1" :branch :main :base-revision "root"
+                        :actor "lead" :clock 1 :message "Coordinate" :events [event-main]})
+        architecture (integration/commit-design-revision
+                      main {:id "arch-1" :branch :architecture :base-revision "root"
+                            :actor "architect" :clock 2 :message "Option A" :events [event-arch]})
+        approved (integration/review-design-revision
+                  architecture {:revision "arch-1" :reviewer "bim-manager"
+                                :decision :approved :clock 3})
+        merged (integration/merge-design-branches
+                approved {:id "merge-1" :target :main :source :architecture
+                          :actor "bim-manager" :clock 4 :required-approvals 1})
+        workspace (-> (:merge/workspace merged)
+                      (integration/create-coordination-issue
+                       {:id "issue-1" :title "Confirm wall type" :author "bim-manager"
+                        :assignee "architect" :element-ids [10] :clock 5})
+                      (integration/transition-coordination-issue
+                       "issue-1" :in-review "architect" 6 "Updated"))
+        payload (integration/cloud-itonami-sync-payload workspace checkpoint)]
+    (is (= :merged (:merge/status merged)))
+    (is (= :design/collaboration-synchronized (:itonami/event payload)))
+    (is (= "merge-1" (:design/head-revision payload)))
+    (is (= "Integrated Tower A" (:design/project-name payload)))
+    (is (= :in-review (get-in payload [:coordination/issues "issue-1" :issue/status])))
+    (is (= :approved (get-in payload [:coordination/reviews "arch-1" "bim-manager"
+                                      :review/decision])))
+    (is (seq (:design/line-items payload)))))
+
 (deftest structural-and-mep-federation
   (let [project (integrated-project)
         beam (integration/structural-member
