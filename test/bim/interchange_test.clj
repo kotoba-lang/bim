@@ -53,3 +53,38 @@
     (is (some #{"Rated wall"} text))
     (is (< 840 (get-in page [:MediaBox 2]) 843))
     (is (< 1190 (get-in page [:MediaBox 3]) 1192))))
+
+(deftest publishes-semantic-sheets-in-order-with-title-blocks-and-schedules
+  (let [drawing-set
+        {:drawing/views [{:view/id "plan-1" :view/kind :floor-plan
+                          :view/name "Ground GA" :view/storey-id 1}
+                         {:view/id "section-a" :view/kind :section
+                          :view/name "Section A"}]
+         :drawing/schedules [{:schedule/id "door-schedule" :schedule/name "Door Schedule"
+                              :schedule/fields [{:key :name} {:key :count}]
+                              :schedule/rows [{:name "D01" :count 4}]}]
+         :drawing/sheets
+         [{:sheet/id "s1" :sheet/number "A-101" :sheet/name "Plans"
+           :sheet/views ["plan-1"]
+           :sheet/title-block {:title-block/organization "Kotoba Architects"
+                               :title-block/project "Library"}
+           :sheet/revisions [{:revision "P02"}]
+           :sheet/print-setting {:print-setting/paper-size :a3
+                                 :print-setting/orientation :landscape}}
+          {:sheet/id "s2" :sheet/number "A-401" :sheet/name "Sections and Schedules"
+           :sheet/views ["section-a" "door-schedule"]
+           :sheet/title-block {:title-block/project "Library"}}]}
+        bytes (interchange/drawing-set-pdf [storey] {:drawing-set drawing-set})
+        parsed (pdf/parse bytes)
+        pages (pdf/pages parsed)
+        texts (mapv #(pdf/page-text (:objects parsed) %) pages)]
+    (is (= 2 (count pages)))
+    (is (= "A-101  Plans" (first (first texts))))
+    (is (some #{"1. Ground GA [floor-plan]"} (first texts)))
+    (is (some #{"Kotoba Architects | Library | Revision P02"} (first texts)))
+    (is (= "A-401  Sections and Schedules" (first (second texts))))
+    (is (some #{"1. Section A [section]"} (second texts)))
+    (is (some #{"2. Door Schedule"} (second texts)))
+    (is (some #{"1  D01 | 4"} (second texts)))
+    (is (> (get-in (first pages) [:MediaBox 2])
+           (get-in (first pages) [:MediaBox 3])))))
