@@ -126,6 +126,23 @@
                        (- 1.0 (reduce + (map (fn [v] (* v v)) %)))) 1.0e-9)
                 (:normals pipe-mesh)))))
 
+(deftest rotated-extrusion-placement-projection
+  (let [element (bim/element
+                 {:id 63 :kind :other :name "Rotated extrusion"
+                  :geometry {:kind :extruded-area-solid
+                             :profile {:kind :rectangle :x-dim 2.0 :y-dim 1.0}
+                             :position {:location [10.0 20.0 30.0]
+                                        :axis [1.0 0.0 0.0]
+                                        :ref-direction [0.0 1.0 0.0]}
+                             :direction [0.0 0.0 1.0] :depth 4.0}})
+        positions (:positions (bim/element-mesh element))]
+    (is (= 10.0 (reduce min (map first positions))))
+    (is (= 14.0 (reduce max (map first positions))))
+    (is (= 19.0 (reduce min (map second positions))))
+    (is (= 21.0 (reduce max (map second positions))))
+    (is (= 29.5 (reduce min (map #(nth % 2) positions))))
+    (is (= 30.5 (reduce max (map #(nth % 2) positions))))))
+
 (deftest storey-lifecycle-integrity
   (let [ground (bim/storey {:id 3 :name "Ground" :elevation 0 :height 3.2 :placement :identity :spaces [] :elements []})
         project (-> (bim/project "Tower")
@@ -271,8 +288,13 @@
                                              :items [{:kind :boolean-result :operator :difference
                                                       :first-operand {:kind :extruded-area-solid
                                                                       :profile {:kind :rectangle :x-dim 4 :y-dim 2}
-                                                                      :depth 3}
-                                                      :second-operand {:kind :half-space-solid}}
+                                                                      :position {:location [0 0 0]}
+                                                                      :direction [0 0 1] :depth 3}
+                                                      :second-operand {:kind :half-space-solid
+                                                                       :agreement-flag false
+                                                                       :base-surface {:kind :plane
+                                                                                      :position {:location [0 0 1.5]
+                                                                                                 :axis [0 0 1]}}}}
                                                      {:kind :extruded-area-solid
                                                       :profile {:kind :rectangle :x-dim 1 :y-dim 1}
                                                       :depth 0.5}]}}
@@ -315,7 +337,9 @@
     (is (= [5.0 6.0 0.0] (first (:positions mapped-mesh))))
     (is (= [9.0 8.0 3.0] (nth (:positions mapped-mesh) 6)))
     (is (= :collection (get-in clipped [:geometry :kind])))
-    (is (= 8 (count (:positions clipped-mesh))))
+    (is (= 16 (count (:positions clipped-mesh))))
+    (is (= 1.5 (reduce min (map #(nth % 2) (take 8 (:positions clipped-mesh))))))
+    (is (= 3.0 (reduce max (map #(nth % 2) (take 8 (:positions clipped-mesh))))))
     (is (= :faceted-brep (get-in brep [:geometry :kind])))
     (is (= 12 (count (:positions brep-mesh))))
     (is (= 12 (count (:indices brep-mesh))))
