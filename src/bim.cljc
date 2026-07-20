@@ -364,11 +364,26 @@
               (:faces geometry))]
     (when (seq face-meshes) (merge-meshes face-meshes))))
 
+(defn- indexed-face-mesh [coordinates indices]
+  (let [points (mapv #(nth coordinates (dec %)) indices)]
+    (when (>= (count points) 3)
+      {:positions points
+       :indices (vec (mapcat (fn [i] [0 i (inc i)]) (range 1 (dec (count points)))))
+       :normals (vec (repeat (count points) (face-normal (take 3 points))))})))
+
+(defn- tessellated-mesh [geometry]
+  (let [indices (case (:kind geometry)
+                  :triangulated-face-set (:coord-indices geometry)
+                  :polygonal-face-set (map :outer (:faces geometry)))
+        meshes (keep #(indexed-face-mesh (:coordinates geometry) %) indices)]
+    (when (seq meshes) (merge-meshes meshes))))
+
 (defn- geometry-mesh [geometry]
   (case (:kind geometry)
     :extruded-area-solid (extruded-area-mesh geometry)
     :mapped-item (mapped-item-mesh geometry)
     :faceted-brep (faceted-brep-mesh geometry)
+    (:triangulated-face-set :polygonal-face-set) (tessellated-mesh geometry)
     :collection (let [meshes (keep geometry-mesh (:items geometry))]
                   (when (seq meshes) (merge-meshes meshes)))
     :boolean-result (when (= :union (:operator geometry))

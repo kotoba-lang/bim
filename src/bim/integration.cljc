@@ -84,6 +84,33 @@
                                       :name "General Arrangements"
                                       :views (mapv :view/id views)})]}))
 
+(defn- exported-geometry [element]
+  (let [geometry (:geometry element)]
+    (case (:kind geometry)
+      :axis-sweep
+      (let [[[x0 y0 z0] [x1 y1 _]] (:axis geometry)
+            thickness (get-in geometry [:profile :thickness])
+            height (get-in geometry [:profile :height])
+            dx (- x1 x0) dy (- y1 y0)
+            length (#?(:clj Math/sqrt :cljs js/Math.sqrt) (+ (* dx dx) (* dy dy)))
+            px (* (/ (- dy) length) (/ thickness 2.0))
+            py (* (/ dx length) (/ thickness 2.0))]
+        {:kind :extruded-area-solid
+         :profile {:kind :arbitrary-closed :name "Wall footprint"
+                   :points [[(+ x0 px) (+ y0 py)] [(+ x1 px) (+ y1 py)]
+                            [(- x1 px) (- y1 py)] [(- x0 px) (- y0 py)]
+                            [(+ x0 px) (+ y0 py)]]}
+         :position {:location [0.0 0.0 z0]} :direction [0.0 0.0 1.0] :depth height})
+      :slab-extrusion
+      (let [boundary (:boundary geometry) z (nth (first boundary) 2 0.0)]
+        {:kind :extruded-area-solid
+         :profile {:kind :arbitrary-closed :name "Slab footprint"
+                   :points (mapv (fn [[x y _]] [x y])
+                                 (conj (vec boundary) (first boundary)))}
+         :position {:location [0.0 0.0 z]} :direction [0.0 0.0 1.0]
+         :depth (:thickness geometry)})
+      geometry)))
+
 (defn export-ifc
   "Create a lossless, EDN-native IFC 4.3 semantic exchange document. This is
   the canonical boundary consumed by STEP/JSON adapters; it is not STEP text."
@@ -92,7 +119,9 @@
    {:project {:id (:id project) :name (:name project) :model project}
     :elements (mapv (fn [element]
                       {:id (:id element) :global-id (:global-id element)
-                       :kind (:kind element) :name (:name element)})
+                       :kind (:kind element) :name (:name element)
+                       :placement (when (map? (:placement element)) (:placement element))
+                       :geometry (exported-geometry element)})
                     (all-elements project))}))
 
 (defn import-ifc [document]

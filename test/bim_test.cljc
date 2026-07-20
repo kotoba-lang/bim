@@ -97,6 +97,17 @@
     (is (= 36 (count (:indices mesh))))
     (is (= mesh (bim/element-mesh slab)))))
 
+(deftest tessellated-ifc-mesh-projection
+  (let [element (bim/element
+                 {:id 60 :kind :other :name "Tessellated"
+                  :geometry {:kind :triangulated-face-set :closed true
+                             :coordinates [[0 0 0] [2 0 0] [0 2 0] [0 0 2]]
+                             :coord-indices [[1 2 3] [1 4 2] [2 4 3] [3 4 1]]}})
+        mesh (bim/element-mesh element)]
+    (is (= 12 (count (:positions mesh))))
+    (is (= 12 (count (:indices mesh))))
+    (is (= [0.0 0.0 1.0] (first (:normals mesh))))))
+
 (deftest storey-lifecycle-integrity
   (let [ground (bim/storey {:id 3 :name "Ground" :elevation 0 :height 3.2 :placement :identity :spaces [] :elements []})
         project (-> (bim/project "Tower")
@@ -175,10 +186,16 @@
 (deftest ifc-spf-and-svg-deliverables
   (let [project (integrated-project)
         spf (ifc/write-spf project)
+        standard-spf (ifc/write-standard-spf project)
+        standard-document (ifc/read-document standard-spf)
         svg (drawing/floor-plan-svg (bim/find-storey project 3))]
     (is (.startsWith spf "ISO-10303-21;"))
     (is (re-find #"IFCWALL" spf))
     (is (= project (ifc/read-spf spf)))
+    (is (= :external-spf (:ifc/source standard-document)))
+    (is (re-find #"IFCEXTRUDEDAREASOLID" standard-spf))
+    (is (= :arbitrary-closed
+           (get-in standard-document [:ifc/elements 0 :geometry :profile :kind])))
     (is (re-find #"<svg" svg))
     (is (re-find #"<line" svg))))
 
