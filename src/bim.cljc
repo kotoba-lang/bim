@@ -333,9 +333,8 @@
     {:positions positions :indices (vec (concat bottom-tris top-tris sides))
      :normals (vec (repeat (* 2 n) (v3-normalize extrusion)))}))
 
-(defn- extruded-area-mesh [geometry]
-  (let [profile (:profile geometry)
-        raw-points (case (:kind profile)
+(defn- profile-points [profile]
+  (let [raw-points (case (:kind profile)
                      :rectangle (let [hx (/ (:x-dim profile) 2.0) hy (/ (:y-dim profile) 2.0)]
                                   [[(- hx) (- hy)] [hx (- hy)] [hx hy] [(- hx) hy]])
                      :arbitrary-closed (:points profile)
@@ -353,18 +352,30 @@
                                  [w d] [(- w) d] [(- w) (- d flange)]
                                  [(- web) (- d flange)] [(- web) (+ (- d) flange)]
                                  [(- w) (+ (- d) flange)]])
-                     nil)
-        points (if (= (first raw-points) (last raw-points)) (vec (butlast raw-points)) raw-points)
-        origin (point3 (get-in geometry [:position :location]))
-        z-axis (v3-normalize (point3 (or (get-in geometry [:position :axis]) [0.0 0.0 1.0])))
-        x-axis (v3-normalize (point3 (or (get-in geometry [:position :ref-direction]) [1.0 0.0 0.0])))
+                     nil)]
+    (if (= (first raw-points) (last raw-points)) (vec (butlast raw-points)) raw-points)))
+
+(defn- positioned-profile-boundary [profile position]
+  (let [points (profile-points profile)
+        origin (point3 (:location position))
+        z-axis (v3-normalize (point3 (or (:axis position) [0.0 0.0 1.0])))
+        x-axis (v3-normalize (point3 (or (:ref-direction position) [1.0 0.0 0.0])))
         y-axis (v3-normalize (v3-cross z-axis x-axis))
         [px py pz] (get-in profile [:position :location] [0.0 0.0 0.0])
-        boundary (mapv (fn [point] (let [[x y z] (point3 point)]
-                                     (mapv + origin
-                                           (mapv #(* (+ px x) %) x-axis)
-                                           (mapv #(* (+ py y) %) y-axis)
-                                           (mapv #(* (+ pz z) %) z-axis)))) points)
+        boundary (mapv (fn [point]
+                         (let [[x y z] (point3 point)]
+                           (mapv + origin
+                                 (mapv #(* (+ px x) %) x-axis)
+                                 (mapv #(* (+ py y) %) y-axis)
+                                 (mapv #(* (+ pz z) %) z-axis)))) points)]
+    boundary))
+
+(defn- extruded-area-mesh [geometry]
+  (let [boundary (positioned-profile-boundary (:profile geometry) (:position geometry))
+        position (:position geometry)
+        z-axis (v3-normalize (point3 (or (:axis position) [0.0 0.0 1.0])))
+        x-axis (v3-normalize (point3 (or (:ref-direction position) [1.0 0.0 0.0])))
+        y-axis (v3-normalize (v3-cross z-axis x-axis))
         [dx dy dz] (point3 (or (:direction geometry) [0.0 0.0 1.0]))
         unit-direction (v3-normalize
                         (mapv + (mapv #(* dx %) x-axis)
@@ -794,6 +805,148 @@
                   extruded-area-mesh)))
       nil)))
 
+(defn- v3-scale [factor vector] (mapv #(* factor %) vector))
+(defn- v3-add [& vectors] (reduce #(mapv + %1 %2) [0.0 0.0 0.0] vectors))
+
+(defn- loft-rings-mesh [rings cap-ends?]
+  (let [ring-count (count rings) ring-size (count (first rings))
+        positions (vec (mapcat identity rings))
+        sides (mapcat (fn [ring]
+                        (mapcat (fn [j]
+                                  (let [next-j (mod (inc j) ring-size)
+                                        a (+ (* ring ring-size) j)
+                                        b (+ (* ring ring-size) next-j)
+                                        c (+ (* (inc ring) ring-size) j)
+                                        d (+ (* (inc ring) ring-size) next-j)]
+                                    [a b c b d c]))
+                                (range ring-size)))
+                      (range (dec ring-count)))
+        caps (when cap-ends?
+               (concat
+                (mapcat (fn [i] [0 (inc i) i]) (range 1 (dec ring-size)))
+                (let [offset (* (dec ring-count) ring-size)]
+                  (mapcat (fn [i] [offset (+ offset i) (+ offset (inc i))])
+                          (range 1 (dec ring-size))))))
+        indices (vec (concat sides caps))
+        normals
+        (reduce (fn [acc [a b c]]
+                  (let [normal (face-normal [(nth positions a) (nth positions b)
+                                             (nth positions c)])]
+                    (-> acc (update a v3-add normal) (update b v3-add normal)
+                        (update c v3-add normal))))
+                (vec (repeat (count positions) [0.0 0.0 0.0]))
+                (partition 3 indices))]
+    (when (and (> ring-count 1) (> ring-size 2))
+      {:positions positions :indices indices :normals (mapv v3-normalize normals)})))
+
+(defn- rotate-about-axis [point origin axis angle]
+  (let [relative (v3-sub point origin)
+        cosine (#?(:clj Math/cos :cljs js/Math.cos) angle)
+        sine (#?(:clj Math/sin :cljs js/Math.sin) angle)]
+    (v3-add origin
+            (v3-scale cosine relative)
+            (v3-scale sine (v3-cross axis relative))
+            (v3-scale (* (- 1.0 cosine) (v3-dot axis relative)) axis))))
+
+(defn- revolved-area-mesh [geometry]
+  (let [boundary (positioned-profile-boundary (:profile geometry) (:position geometry))
+        origin (point3 (get-in geometry [:axis :location]))
+        axis (v3-normalize (point3 (or (get-in geometry [:axis :axis]) [0 0 1])))
+        angle (:angle geometry)
+        steps (max 3 (long (#?(:clj Math/ceil :cljs js/Math.ceil)
+                            (/ (#?(:clj Math/abs :cljs js/Math.abs) angle) (/ pi 12.0)))))
+        rings (mapv (fn [step]
+                      (let [theta (* angle (/ step steps))]
+                        (mapv #(rotate-about-axis % origin axis theta) boundary)))
+                    (range (inc steps)))
+        full? (< (#?(:clj Math/abs :cljs js/Math.abs)
+                  (- (#?(:clj Math/abs :cljs js/Math.abs) angle) (* 2.0 pi))) 1.0e-6)]
+    (loft-rings-mesh rings (not full?))))
+
+(defn- positive-angle [angle]
+  (let [tau (* 2.0 pi)] (if (neg? angle) (+ angle tau) angle)))
+
+(defn- sampled-arc [p1 p2 p3]
+  (let [a (v3-sub p2 p1) b (v3-sub p3 p1) normal (v3-cross a b)
+        normal2 (v3-dot normal normal)]
+    (if (< normal2 1.0e-12)
+      [p1 p2 p3]
+      (let [center (v3-add p1
+                           (v3-scale (/ 1.0 (* 2.0 normal2))
+                                     (v3-add (v3-scale (v3-dot a a) (v3-cross b normal))
+                                             (v3-scale (v3-dot b b) (v3-cross normal a)))))
+            u (v3-normalize (v3-sub p1 center))
+            n (v3-normalize normal) v (v3-normalize (v3-cross n u))
+            angle-of (fn [point]
+                       (let [delta (v3-sub point center)]
+                         (positive-angle (#?(:clj Math/atan2 :cljs js/Math.atan2)
+                                          (v3-dot delta v) (v3-dot delta u)))))
+            middle-angle (angle-of p2) end-angle (angle-of p3)
+            end-angle (if (<= middle-angle end-angle) end-angle (- end-angle (* 2.0 pi)))
+            steps (max 4 (long (#?(:clj Math/ceil :cljs js/Math.ceil)
+                                 (/ (#?(:clj Math/abs :cljs js/Math.abs) end-angle)
+                                    (/ pi 12.0)))))
+            radius (sqrt (v3-dot (v3-sub p1 center) (v3-sub p1 center)))]
+        (mapv (fn [step]
+                (let [angle (* end-angle (/ step steps))]
+                  (v3-add center
+                          (v3-scale (* radius (#?(:clj Math/cos :cljs js/Math.cos) angle)) u)
+                          (v3-scale (* radius (#?(:clj Math/sin :cljs js/Math.sin) angle)) v))))
+              (range (inc steps)))))))
+
+(defn- curve-path [curve]
+  (case (:kind curve)
+    :polyline (mapv point3 (:points curve))
+    :indexed-polycurve
+    (let [points (mapv point3 (:points curve))]
+      (if (seq (:segments curve))
+        (vec
+         (mapcat (fn [{:keys [kind indices]}]
+                   (let [selected (mapv #(nth points (dec %)) indices)]
+                     (if (= :arc kind)
+                       (sampled-arc (nth selected 0) (nth selected 1) (nth selected 2))
+                       selected)))
+                 (:segments curve)))
+        points))
+    :composite-curve
+    (vec (mapcat (fn [segment]
+                   (cond-> (curve-path (:parent-curve segment))
+                     (false? (:same-sense segment)) reverse))
+                 (:segments curve)))
+    []))
+
+(defn- dedupe-adjacent [points]
+  (reduce (fn [result point]
+            (if (= point (peek result)) result (conj result point))) [] points))
+
+(defn- swept-area-mesh [geometry]
+  (let [path (vec (dedupe-adjacent (curve-path (:directrix geometry))))
+        profile (profile-points (:profile geometry))
+        reference (point3 (or (:fixed-reference geometry)
+                              (get-in geometry [:reference-surface :position :axis])
+                              [0 0 1]))
+        last-index (dec (count path))
+        rings
+        (mapv (fn [i]
+                (let [point (nth path i)
+                      tangent (v3-normalize
+                               (cond (= i 0) (v3-sub (nth path 1) point)
+                                     (= i last-index) (v3-sub point (nth path (dec i)))
+                                     :else (v3-sub (nth path (inc i)) (nth path (dec i)))))
+                      fallback (if (> (#?(:clj Math/abs :cljs js/Math.abs)
+                                         (v3-dot tangent [0 0 1])) 0.9)
+                                 [0 1 0] [0 0 1])
+                      u0 (v3-cross reference tangent)
+                      u (v3-normalize (if (< (v3-dot u0 u0) 1.0e-12)
+                                        (v3-cross fallback tangent) u0))
+                      v (v3-normalize (v3-cross tangent u))]
+                  (mapv (fn [[x y & _]]
+                          (v3-add point (v3-scale x u) (v3-scale y v)))
+                        profile)))
+              (range (count path)))]
+    (when (and (> (count path) 1) (> (count profile) 2))
+      (loft-rings-mesh rings true))))
+
 (defn- swept-disk-mesh [geometry]
   (let [path (mapv point3 (:directrix geometry)) ring-size 12 radius (:radius geometry)
         last-index (dec (count path))
@@ -837,6 +990,9 @@
 (defn- geometry-mesh [geometry]
   (case (:kind geometry)
     :extruded-area-solid (extruded-area-mesh geometry)
+    :revolved-area-solid (revolved-area-mesh geometry)
+    (:fixed-reference-swept-area-solid :surface-curve-swept-area-solid)
+    (swept-area-mesh geometry)
     :mapped-item (mapped-item-mesh geometry)
     :faceted-brep (faceted-brep-mesh geometry)
     :advanced-brep (advanced-brep-mesh geometry)
