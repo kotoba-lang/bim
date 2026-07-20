@@ -511,6 +511,42 @@
             :psets {"Pset_WallCommon" (property-set "Pset_WallCommon" {:IsExternal (bool-value true)})}
             :openings [] :connected-to []}))
 
+(defn set-wall-layers
+  "Apply an ordered compound build-up, deriving total thickness and volumes."
+  [wall-element layers]
+  (when-not (= :wall (:kind wall-element))
+    (throw (ex-info "compound layers require a wall" {:element-id (:id wall-element)})))
+  (when-not (seq layers)
+    (throw (ex-info "compound wall requires at least one material layer" {})))
+  (doseq [layer layers]
+    (when-not (and (some? (:material layer)) (finite-number? (:thickness layer))
+                   (pos? (:thickness layer))
+                   (contains? material-categories (:category layer)))
+      (throw (ex-info "invalid compound wall layer" {:layer layer}))))
+  (let [total-thickness (reduce + (map :thickness layers))
+        length (get-in wall-element [:quantities :length-m])
+        height (get-in wall-element [:geometry :profile :height])
+        opening-area (reduce + 0.0 (map #(let [{:keys [width height]} (:profile %)]
+                                                (* width height))
+                                            (:openings wall-element)))
+        gross-area (* length height) net-area (- gross-area opening-area)
+        layers (mapv #(assoc % :gross-volume-m3 (* gross-area (:thickness %))
+                               :net-volume-m3 (* net-area (:thickness %))) layers)
+        gross-volume (* gross-area total-thickness)
+        net-volume (* net-area total-thickness)]
+    (-> wall-element
+        (assoc :material-layers layers)
+        (assoc-in [:geometry :profile :thickness] total-thickness)
+        (assoc-in [:quantities :gross-area-m2] gross-area)
+        (assoc-in [:quantities :net-area-m2] net-area)
+        (assoc-in [:quantities :gross-volume-m3] gross-volume)
+        (assoc-in [:quantities :net-volume-m3] net-volume))))
+
+(defn compound-wall
+  "Construct a wall whose thickness and material quantities derive from layers."
+  [{:keys [layers] :as options}]
+  (set-wall-layers (wall (dissoc options :layers)) layers))
+
 (defn- polygon-area [points]
   (#?(:clj Math/abs :cljs js/Math.abs)
    (/ (reduce + (map (fn [[[x1 y1 _] [x2 y2 _]]] (- (* x1 y2) (* x2 y1)))
@@ -1248,10 +1284,14 @@
       (throw (ex-info "opening exceeds wall bounds" {:wall-length length :wall-height wall-height :opening opening})))
     (when (some overlaps? (:openings wall))
       (throw (ex-info "opening overlaps an existing opening" {:opening-id (:id opening)})))
-    (update wall :openings conj opening)))
+    (let [updated (update wall :openings conj opening)]
+      (if (> (count (:material-layers updated)) 1)
+        (set-wall-layers updated (:material-layers updated)) updated))))
 
 (defn remove-opening-from-wall [wall opening-id]
-  (update wall :openings #(vec (remove (fn [opening] (= opening-id (:id opening))) %))))
+  (let [updated (update wall :openings #(vec (remove (fn [opening] (= opening-id (:id opening))) %)))]
+    (if (> (count (:material-layers updated)) 1)
+      (set-wall-layers updated (:material-layers updated)) updated)))
 
 (defn wall-mesh
   "Convert a horizontal axis-sweep rectangle wall into an indexed box mesh."
@@ -1269,7 +1309,7 @@
     {:positions positions :indices indices :normals (vec (repeat 8 [0 0 1]))}))
 
 (declare merge-meshes)
-(defn wall-with-openings-mesh
+(defn- single-layer-wall-with-openings-mesh
   "Generate wall geometry with non-overlapping rectangular hosted openings."
   [wall-element]
   (if (empty? (:openings wall-element))
@@ -1297,6 +1337,37 @@
                     (concat (map #(get-in % [:placement :offset]) openings) [length]))
           full-height (map (fn [[a b]] (box a b 0 wall-height)) (filter (fn [[a b]] (< a b)) gaps))]
       (merge-meshes (concat full-height vertical)))))
+
+(defn wall-layer-meshes
+  "Generate one opening-aware mesh per ordered compound wall layer."
+  [wall-element]
+  (let [layers (:material-layers wall-element)
+        total (reduce + (map :thickness layers))
+        [[x0 y0 z0] [x1 y1 z1]] (get-in wall-element [:geometry :axis])
+        dx (- x1 x0) dy (- y1 y0) length (sqrt (+ (* dx dx) (* dy dy)))
+        normal [(/ (- dy) length) (/ dx length) 0.0]]
+    (loop [remaining layers cursor (/ (- total) 2.0) meshes []]
+      (if-let [layer (first remaining)]
+        (let [thickness (:thickness layer)
+              center (+ cursor (/ thickness 2.0))
+              shift (mapv #(* center %) normal)
+              layer-wall (-> wall-element
+                             (assoc :material-layers [layer])
+                             (assoc-in [:geometry :axis]
+                                       [(mapv + [x0 y0 z0] shift)
+                                        (mapv + [x1 y1 z1] shift)])
+                             (assoc-in [:geometry :profile :thickness] thickness))]
+          (recur (next remaining) (+ cursor thickness)
+                 (conj meshes (assoc (single-layer-wall-with-openings-mesh layer-wall)
+                                     :material-layer layer))))
+        meshes))))
+
+(defn wall-with-openings-mesh
+  "Generate a merged visual mesh while retaining per-layer mesh access."
+  [wall-element]
+  (if (> (count (:material-layers wall-element)) 1)
+    (merge-meshes (wall-layer-meshes wall-element))
+    (single-layer-wall-with-openings-mesh wall-element)))
 
 (defn- distance3 [a b]
   (sqrt (reduce + (map (fn [x y] (let [delta (- x y)] (* delta delta))) a b))))
@@ -1326,11 +1397,13 @@
                                       {:wall-id (:id wall-element) :opening-id (:id opening)
                                        :offset offset :width width :wall-length length})))
                     (assoc-in opening [:placement :offset] (max 0.0 offset))))
-                (:openings wall-element))]
-      (-> wall-element
-          (assoc-in [:geometry :axis] [(vec start) (vec end)])
-          (assoc-in [:quantities :length-m] length)
-          (assoc :openings openings)))))
+                (:openings wall-element))
+          updated (-> wall-element
+                      (assoc-in [:geometry :axis] [(vec start) (vec end)])
+                      (assoc-in [:quantities :length-m] length)
+                      (assoc :openings openings))]
+      (if (> (count (:material-layers updated)) 1)
+        (set-wall-layers updated (:material-layers updated)) updated))))
 
 (defn offset-wall
   "Offset a wall in its local plan perpendicular by a signed distance."
