@@ -369,7 +369,8 @@
 
 (deftest routes-and-validates-mep-systems
   (let [route (integration/route-mep [0.0 0.0 0.0] [3.0 0.0 0.0]
-                                     [{:min [1.0 -0.5 -0.5] :max [2.0 0.5 0.5]}]
+                                     [{:min [1.0 -0.5 -0.5] :max [2.0 0.5 0.5]}
+                                      {:min [2.9 -0.1 -0.1] :max [3.1 0.1 0.1]}]
                                      {:step 0.5 :clearance 0.0})
         connector-a (integration/mep-connector
                      {:id :a :point [1 0 0] :direction [1 0 0] :domain :piping
