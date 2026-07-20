@@ -1,7 +1,8 @@
 (ns bim.integration
   "Portable contracts that connect BIM authoring, drawings, IFC exchange,
   collaboration, and cloud-itonami. All functions are pure and CLJC-safe."
-  (:require [clojure.walk :as walk]
+  (:require [clojure.string :as string]
+            [clojure.walk :as walk]
             [bim :as bim]
             [ifc.core :as ifc]
             [kotoba.document.change :as document-change]
@@ -550,11 +551,24 @@
       geometry)))
 
 (defn- exported-property [value]
-  {:value (:value value)
-   :value-type (case (:kind value)
-                 :bool :ifcboolean :int :ifcinteger :real :ifcreal
-                 :measured (case (:unit value) :metre :ifclengthmeasure :ifcreal)
-                 :ifclabel)})
+  (case (:kind value)
+    :enum-list {:kind :enumerated :values (:values value)
+                :value-type (or (:value-type value) :ifclabel)
+                :enumeration {:name (or (:enumeration-name value) "AllowedValues")
+                              :values (vec (:allowed value))}}
+    :bounded {:kind :bounded :lower (:lower value) :upper (:upper value)
+              :set-point (:set-point value) :value-type (:value-type value)
+              :unit (:ifc/unit value)}
+    :list {:kind :list :values (:values value) :value-type (:value-type value)
+           :unit (:ifc/unit value)}
+    :enum {:kind :enumerated :values [(:value value)] :value-type :ifclabel
+           :enumeration {:name "AllowedValues" :values (vec (:allowed value))}}
+    {:kind :single :value (:value value)
+     :value-type (case (:kind value)
+                   :bool :ifcboolean :int :ifcinteger :real :ifcreal
+                   :measured (case (:unit value) :metre :ifclengthmeasure :ifcreal)
+                   :ifclabel)
+     :unit (:ifc/unit value)}))
 
 (defn- exported-psets [element]
   (into {}
@@ -566,6 +580,77 @@
                                                 (exported-property value)]))
                                         (:props pset))}]))
         (:psets element)))
+
+(defn- quantity-kind [quantity-name]
+  (let [name (string/lower-case (clojure.core/name quantity-name))]
+    (cond
+      (string/includes? name "area") :area
+      (string/includes? name "volume") :volume
+      (string/includes? name "weight") :weight
+      (string/includes? name "time") :time
+      (string/includes? name "count") :count
+      :else :length)))
+
+(defn- exported-quantity-sets [element]
+  (if-let [source (:ifc/quantity-sets element)]
+    (into {}
+          (map (fn [[qset-name qset]]
+                 [qset-name
+                  (update qset :quantities
+                          (fn [quantities]
+                            (into {}
+                                  (map (fn [[name quantity]]
+                                         [name
+                                          (if (contains? (:quantities element)
+                                                         (keyword name))
+                                            (assoc quantity :value
+                                                   (get (:quantities element)
+                                                        (keyword name)))
+                                            quantity)]))
+                                  quantities)))]))
+          source)
+    (when (seq (:quantities element))
+      {"Qto_KotobaBaseQuantities"
+       {:name "Qto_KotobaBaseQuantities"
+        :quantities
+        (into {}
+              (map (fn [[name value]]
+                     [(clojure.core/name name)
+                      {:kind (quantity-kind name) :value value}]))
+              (:quantities element))}})))
+
+(defn- exported-material [element]
+  (when (or (:ifc/material element) (seq (:material-layers element)))
+    (let [source (or (:ifc/material element)
+                     {:kind :layer-set-usage
+                      :direction (if (= :slab (:kind element)) :axis3 :axis2)
+                      :direction-sense :positive :offset 0.0
+                      :layer-set {:name (str (:name element) " Layers")}})
+          source-layers (get-in source [:layer-set :layers])]
+      (if-not (seq (:material-layers element))
+        source
+        (assoc-in
+         source [:layer-set :layers]
+         (mapv (fn [index layer]
+                 (let [original (get source-layers index)]
+                   (-> (or original {})
+                       (assoc :material
+                              (merge (:material original)
+                                     {:name (some-> (:material layer) clojure.core/name)
+                                      :category (some-> (:category layer) clojure.core/name)}))
+                       (assoc :thickness (:thickness layer)
+                              :ventilated (:is-ventilated layer)
+                              :category (some-> (:category layer) clojure.core/name)))))
+               (range) (:material-layers element)))))))
+
+(defn- exported-classifications [element]
+  (when-let [classification (:classification element)]
+    (let [sources (vec (or (seq (:ifc/classifications element)) [{}]))]
+      (assoc sources 0
+             (-> (first sources)
+                 (assoc :identification (:code classification)
+                        :name (:description classification))
+                 (assoc-in [:source :name] (:source classification)))))))
 
 (defn- exported-opening [wall opening]
   (let [[[x0 y0 z0] [x1 y1 _]] (get-in wall [:geometry :axis])
@@ -586,6 +671,9 @@
    :placement (when (map? (:placement element)) (:placement element))
    :geometry (exported-geometry element)
    :property-sets (exported-psets element)
+   :quantity-sets (exported-quantity-sets element)
+   :material (exported-material element)
+   :classifications (exported-classifications element)
    :type-object (:type-object element)
    :openings (if (= :wall (:kind element))
                (mapv #(exported-opening element %) (:openings element)) [])})
@@ -671,12 +759,30 @@
 (defn- spatial-descendants [node type]
   (filter #(= type (:type %)) (tree-seq #(seq (:children %)) :children node)))
 
-(defn- imported-property-value [{:keys [value value-type]}]
-  (case value-type
-    :ifcboolean (bim/bool-value value)
-    :ifcinteger (bim/int-value value)
-    (:ifcreal :ifclengthmeasure :ifcareameasure :ifcvolumemeasure) (bim/real-value value)
-    (bim/text-value (str value))))
+(defn- imported-property-value [property]
+  (let [{:keys [value value-type]} property]
+    (case (:kind property)
+      :enumerated
+      (assoc (bim/enum-values (:values property)
+                              (get-in property [:enumeration :values]))
+             :value-type value-type
+             :enumeration-name (get-in property [:enumeration :name]))
+      :bounded
+      (assoc (bim/bounded-value
+              {:lower (:lower property) :upper (:upper property)
+               :set-point (:set-point property) :value-type value-type})
+             :ifc/unit (:unit property))
+      :list
+      (assoc (bim/list-value (:values property) nil value-type)
+             :ifc/unit (:unit property))
+      (assoc
+       (case value-type
+         :ifcboolean (bim/bool-value value)
+         :ifcinteger (bim/int-value value)
+         (:ifcreal :ifclengthmeasure :ifcareameasure :ifcvolumemeasure)
+         (bim/real-value value)
+         (bim/text-value (str value)))
+       :ifc/unit (:unit property)))))
 
 (defn- v3+ [a b] (mapv + a b))
 (defn- v3- [a b] (mapv - a b))
@@ -699,6 +805,30 @@
                                                          (imported-property-value property)]))
                                               (:properties pset)))])
              (:property-sets source))))
+
+(defn- imported-quantities [source]
+  (into {}
+        (mapcat (fn [[_ qset]]
+                  (map (fn [[name quantity]] [(keyword name) (:value quantity)])
+                       (:quantities qset))))
+        (:quantity-sets source)))
+
+(defn- imported-material-layers [source]
+  (mapv (fn [layer]
+          (let [category (some-> (or (:category layer)
+                                     (get-in layer [:material :category]))
+                                 string/lower-case keyword)
+                category (if (contains? bim/material-categories category)
+                           category :other)]
+            (bim/material-layer (get-in layer [:material :name])
+                                (:thickness layer) (:ventilated layer) category)))
+        (get-in source [:material :layer-set :layers])))
+
+(defn- imported-classification [source]
+  (when-let [classification (first (:classifications source))]
+    (bim/classification-ref (get-in classification [:source :name])
+                            (:identification classification)
+                            (or (:name classification) (:description classification)))))
 
 (defn- attach-imported-openings [wall source]
   (reduce
@@ -728,6 +858,9 @@
         profile (:profile geometry)
         x-dim (:x-dim profile) y-dim (:y-dim profile) depth (:depth geometry)
         psets (imported-psets source)
+        quantities (imported-quantities source)
+        material-layers (imported-material-layers source)
+        classification (imported-classification source)
         result
         (case (:kind source)
           :wall (if (and x-dim y-dim depth)
@@ -754,6 +887,13 @@
                   :ifc/kind (:kind source)
                   :type-object (:type-object source)
                   :ifc/property-sets (:property-sets source)
+                  :ifc/quantity-sets (:quantity-sets source)
+                  :ifc/material (:material source)
+                  :ifc/classifications (:classifications source)
+                  :quantities (merge (:quantities result) quantities)
+                  :material-layers (if (seq material-layers)
+                                     material-layers (:material-layers result))
+                  :classification (or classification (:classification result))
                   :psets (merge (:psets result) psets))))
 
 (defn- imported-unit-system [document]

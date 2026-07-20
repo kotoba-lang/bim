@@ -702,7 +702,37 @@
                                   :property-sets {"Pset_WallCommon"
                                                   {:name "Pset_WallCommon"
                                                    :properties {"IsExternal" {:value true :value-type :ifcboolean}
-                                                                "FireRating" {:value "2 HR" :value-type :ifclabel}}}}
+                                                                "FireRating" {:value "2 HR" :value-type :ifclabel}
+                                                                "Status" {:kind :enumerated
+                                                                          :values ["Existing"]
+                                                                          :value-type :ifclabel
+                                                                          :enumeration
+                                                                          {:name "PEnum_ElementStatus"
+                                                                           :values ["New" "Existing"]}}
+                                                                "Temperature" {:kind :bounded
+                                                                               :lower 18.0 :upper 26.0
+                                                                               :set-point 22.0
+                                                                               :value-type :ifcreal}
+                                                                "Zones" {:kind :list
+                                                                         :values ["North" "Perimeter"]
+                                                                         :value-type :ifclabel}}}}
+                                  :quantity-sets
+                                  {"Qto_WallBaseQuantities"
+                                   {:name "Qto_WallBaseQuantities"
+                                    :quantities {"Length" {:kind :length :value 8.0}
+                                                 "GrossSideArea" {:kind :area :value 25.6}}}}
+                                  :material
+                                  {:kind :layer-set-usage :direction :axis2
+                                   :direction-sense :positive :offset -0.1
+                                   :layer-set {:name "Exterior 200mm"
+                                               :layers
+                                               [{:material {:name "Gypsum" :category "Gypsum"}
+                                                 :thickness 0.015}
+                                                {:material {:name "Concrete" :category "Concrete"}
+                                                 :thickness 0.17}]}}
+                                  :classifications
+                                  [{:identification "Ss_25_10_20" :name "Wall systems"
+                                    :source {:name "Uniclass 2015"}}]
                                   :openings [{:id 110 :kind :opening :filled-by 120
                                               :placement {:location [12 20 0]}
                                               :geometry {:kind :extruded-area-solid
@@ -758,7 +788,21 @@
         clipped (first (filter #(= 140 (:id %)) (:elements storey)))
         clipped-mesh (bim/element-mesh clipped)
         brep (first (filter #(= 150 (:id %)) (:elements storey)))
-        brep-mesh (bim/element-mesh brep)]
+        brep-mesh (bim/element-mesh brep)
+        reexported (ifc/read-document (ifc/write-standard-spf project))
+        reexported-wall (first (filter #(= "wall-guid" (:global-id %))
+                                       (:ifc/elements reexported)))
+        edited-project
+        (bim/update-element
+         project 4 100
+         (fn [element]
+           (-> element
+               (assoc-in [:quantities :Length] 9.0)
+               (assoc-in [:material-layers 1 :thickness] 0.2)
+               (assoc-in [:classification :code] "Ss_25_10_30"))))
+        edited-wall
+        (first (:ifc/elements
+                (ifc/read-document (ifc/write-standard-spf edited-project))))]
     (is (= "Tower" (:name project)))
     (is (= "Ground" (:name storey)))
     (is (= "wall-guid" (:global-id wall)))
@@ -768,6 +812,15 @@
     (is (= :metre (get-in project [:units :length])))
     (is (true? (get-in wall [:psets "Pset_WallCommon" :props :IsExternal :value])))
     (is (= "2 HR" (get-in wall [:psets "Pset_WallCommon" :props :FireRating :value])))
+    (is (= ["Existing"]
+           (get-in wall [:psets "Pset_WallCommon" :props :Status :values])))
+    (is (= 22.0
+           (get-in wall [:psets "Pset_WallCommon" :props :Temperature :set-point])))
+    (is (= ["North" "Perimeter"]
+           (get-in wall [:psets "Pset_WallCommon" :props :Zones :values])))
+    (is (= 8.0 (get-in wall [:quantities :Length])))
+    (is (= "Concrete" (get-in wall [:material-layers 1 :material])))
+    (is (= "Ss_25_10_20" (get-in wall [:classification :code])))
     (is (= {:offset 2.0 :sill 0.0} (get-in wall [:openings 0 :placement])))
     (is (= 120 (get-in wall [:openings 0 :filled-by])))
     (is (= :other (:kind mapped)))
@@ -783,7 +836,18 @@
     (is (= :faceted-brep (get-in brep [:geometry :kind])))
     (is (= 12 (count (:positions brep-mesh))))
     (is (= 12 (count (:indices brep-mesh))))
-    (is (= [0.0 0.0 -1.0] (first (:normals brep-mesh))))))
+    (is (= [0.0 0.0 -1.0] (first (:normals brep-mesh))))
+    (is (= 25.6 (get-in reexported-wall [:quantity-sets "Qto_WallBaseQuantities"
+                                         :quantities "GrossSideArea" :value])))
+    (is (= "Concrete" (get-in reexported-wall
+                                [:material :layer-set :layers 1 :material :name])))
+    (is (= "Ss_25_10_20"
+           (get-in reexported-wall [:classifications 0 :identification])))
+    (is (= 9.0 (get-in edited-wall [:quantity-sets "Qto_WallBaseQuantities"
+                                    :quantities "Length" :value])))
+    (is (= 0.2 (get-in edited-wall [:material :layer-set :layers 1 :thickness])))
+    (is (= "Ss_25_10_30"
+           (get-in edited-wall [:classifications 0 :identification])))))
 
 (deftest imports-rotated-ifc-products-in-their-composed-coordinate-system
   (let [document {:ifc/schema "IFC4X3_ADD2"
