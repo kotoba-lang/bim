@@ -494,16 +494,28 @@
                          {:id :n2 :point [2.0 0.0] :restraints [false true]})]
                 :members [(integration/structural-analysis-member
                            {:id :m1 :start-node :n1 :end-node :n2 :area-m2 0.01
-                            :elastic-modulus-pa 2.0e11 :material "S355"})]
+                            :elastic-modulus-pa 2.0e11 :yield-strength-pa 2.5e8
+                            :material "S355"})]
                 :load-cases [(integration/structural-load-case
                               {:id :service :name "Service" :kind :service
-                               :nodal-loads [{:node :n2 :fx 1000.0 :fy 0.0}]})]})
-        result (integration/analyze-2d-truss model :service)]
+                               :nodal-loads [{:node :n2 :fx 1000.0 :fy 0.0}]})
+                             (integration/structural-load-case
+                              {:id :live :name "Live" :kind :variable
+                               :nodal-loads [{:node :n2 :fx 500.0 :fy 0.0}]})]
+                :combinations [(integration/structural-load-combination
+                                {:id :uls :name "ULS" :factors {:service 1.2 :live 1.5}})]})
+        result (integration/analyze-2d-truss model :service)
+        combination (integration/analyze-structural-combination model :uls)]
     (is (empty? (integration/validate-structural-model model)))
     (is (< (#?(:clj Math/abs :cljs js/Math.abs)
             (- 1.0e-6 (get-in result [:structural.analysis/displacements :n2 0]))) 1.0e-12))
     (is (< (#?(:clj Math/abs :cljs js/Math.abs)
-            (- 1000.0 (get-in result [:structural.analysis/member-axial-forces :m1]))) 1.0e-6))))
+            (- 1000.0 (get-in result [:structural.analysis/member-axial-forces :m1]))) 1.0e-6))
+    (is (< (#?(:clj Math/abs :cljs js/Math.abs)
+            (- 1950.0 (get-in combination [:structural.analysis/member-axial-forces :m1])))
+           1.0e-6))
+    (is (true? (get-in combination [:structural.analysis/member-checks :m1 :passes?])))
+    (is (< (get-in combination [:structural.analysis/member-checks :m1 :utilization]) 0.001))))
 
 (deftest routes-and-validates-mep-systems
   (let [route (integration/route-mep [0.0 0.0 0.0] [3.0 0.0 0.0]
@@ -527,13 +539,22 @@
                                         :segments [segment-a segment-b]})
         loss (integration/pressure-loss {:length-m 20.0 :diameter-m 0.1
                                          :roughness-m 1.5e-6 :flow-m3-s 0.005
-                                         :density-kg-m3 998.0 :viscosity-pa-s 0.001})]
+                                         :density-kg-m3 998.0 :viscosity-pa-s 0.001})
+        sizing (integration/size-round-mep-segment 0.005 2.0 [0.04 0.05 0.063 0.075])
+        analysis (integration/analyze-mep-system
+                  system {:roughness-m 1.5e-6 :density-kg-m3 998.0
+                          :viscosity-pa-s 0.001})]
     (is (> (count route) 2))
     (is (some #(not= 0.0 (second %)) route))
     (is (empty? (integration/validate-mep-system system)))
     (is (= :swept-disk-solid (get-in segment-a [:geometry :kind])))
     (is (pos? (:mep/pressure-loss-pa loss)))
-    (is (> (:mep/reynolds loss) 2300.0))))
+    (is (> (:mep/reynolds loss) 2300.0))
+    (is (= 0.063 (:mep/diameter-m sizing)))
+    (is (<= (:mep/velocity-m-s sizing) 2.0))
+    (is (= [:b] (get-in analysis [:mep.analysis/connector-graph :a])))
+    (is (= 2 (count (:mep.analysis/segments analysis))))
+    (is (pos? (:mep.analysis/total-pressure-loss-pa analysis)))))
 
 (deftest ifc-spf-and-svg-deliverables
   (let [opening (bim/rectangular-opening {:id 20 :offset 2.0 :width 0.9 :height 2.1
