@@ -1236,9 +1236,76 @@
          (:view/overrides view)
          (when (:view/scale-explicit? view) {:scale (:view/scale view)})))
 
-(defn drawing-sheet [{:keys [id number name size views revisions]}]
+(defn sheet-viewport
+  "Create a persistent view placement in paper millimetres."
+  [{:keys [id view-id x y width height scale title] :as viewport}]
+  (let [id (or id (:viewport/id viewport))
+        view-id (or view-id (:viewport/view-id viewport))
+        x (or x (:viewport/x viewport)) y (or y (:viewport/y viewport))
+        width (or width (:viewport/width viewport))
+        height (or height (:viewport/height viewport))
+        scale (or scale (:viewport/scale viewport))
+        title (or title (:viewport/title viewport))]
+   (when-not (and (some? id) (some? view-id)
+                 (every? number? [x y width height scale])
+                 (<= 0 x) (<= 0 y) (pos? width) (pos? height) (pos? scale))
+     (throw (ex-info "sheet viewport requires identity, view, bounds, and scale"
+                     {:id id :view-id view-id :bounds [x y width height] :scale scale})))
+   {:viewport/id id :viewport/view-id view-id :viewport/x x :viewport/y y
+    :viewport/width width :viewport/height height :viewport/scale scale
+    :viewport/title (or title (str view-id))}))
+
+(defn title-block
+  "Create reusable title-block metadata and its reserved paper region."
+  [{:keys [id name width height organization project client drawn-by checked-by
+           issue-date status custom-fields]}]
+  (when-not (and (some? id) (number? width) (pos? width)
+                 (number? height) (pos? height))
+    (throw (ex-info "title block requires identity and positive paper size"
+                    {:id id :width width :height height})))
+  {:title-block/id id :title-block/name (or name (str id))
+   :title-block/width width :title-block/height height
+   :title-block/organization organization :title-block/project project
+   :title-block/client client :title-block/drawn-by drawn-by
+   :title-block/checked-by checked-by :title-block/issue-date issue-date
+   :title-block/status status :title-block/custom-fields (or custom-fields {})})
+
+(defn layout-sheet-viewports
+  "Lay out view ids in a deterministic paper grid above the title block."
+  [view-ids {:keys [paper-width paper-height margin gap columns title-block-height scale]
+             :or {margin 15.0 gap 10.0 columns 2 title-block-height 55.0 scale 100.0}}]
+  (when-not (and (seq view-ids) (every? number? [paper-width paper-height margin gap
+                                                 title-block-height scale])
+                 (integer? columns) (pos? columns) (pos? scale))
+    (throw (ex-info "sheet layout requires views, paper bounds, columns, and scale"
+                    {:view-ids view-ids :paper [paper-width paper-height]})))
+  (let [rows (#?(:clj Math/ceil :cljs js/Math.ceil) (/ (count view-ids) columns))
+        usable-width (- paper-width (* 2 margin) (* gap (dec columns)))
+        usable-height (- paper-height (* 2 margin) title-block-height
+                         (* gap (dec rows)))
+        width (/ usable-width columns) height (/ usable-height rows)]
+    (when-not (and (pos? width) (pos? height))
+      (throw (ex-info "sheet layout has no usable viewport area"
+                      {:paper [paper-width paper-height] :cell [width height]})))
+    (mapv (fn [index view-id]
+            (let [column (mod index columns) row (quot index columns)]
+              (sheet-viewport
+               {:id (str "viewport-" view-id) :view-id view-id
+                :x (+ margin (* column (+ width gap)))
+                :y (+ margin (* row (+ height gap)))
+                :width width :height height :scale scale :title (str view-id)})))
+          (range) view-ids)))
+
+(defn drawing-sheet [{:keys [id number name size views viewports title-block revisions]}]
+  (let [viewports (mapv sheet-viewport viewports)
+        viewport-ids (map :viewport/id viewports)]
+    (when-not (= (count viewport-ids) (count (distinct viewport-ids)))
+      (throw (ex-info "drawing sheet contains duplicate viewport ids"
+                      {:sheet-id id :viewport-ids viewport-ids})))
   {:sheet/id id :sheet/number number :sheet/name name :sheet/size (or size :a1)
-   :sheet/views (vec views) :sheet/revisions (vec revisions)})
+   :sheet/views (vec (or views (map :viewport/view-id viewports)))
+   :sheet/viewports viewports :sheet/title-block title-block
+   :sheet/revisions (vec revisions)}))
 
 (def print-paper-sizes #{:a0 :a1 :a2 :a3 :a4 :letter :legal :tabloid})
 
