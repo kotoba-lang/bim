@@ -65,11 +65,13 @@
 (defn- sqrt [x] #?(:clj (Math/sqrt x) :cljs (js/Math.sqrt x)))
 
 (defn element [{:keys [id kind name global-id placement geometry material-layers
-                        classification quantities psets openings connected-to]}]
+                        classification quantities psets openings connected-to
+                        appearance presentation-layers]}]
   {:id id :kind kind :name name :global-id global-id :placement placement :geometry geometry
    :material-layers (vec material-layers) :classification classification
    :quantities (or quantities {}) :psets (or psets {}) :openings (vec openings)
-   :connected-to (vec connected-to)})
+   :connected-to (vec connected-to) :appearance appearance
+   :presentation-layers (vec presentation-layers)})
 
 ;; ElementGeometry variants
 (defn brep-geometry [brep-solid] {:kind :brep :solid brep-solid})
