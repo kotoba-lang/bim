@@ -1084,6 +1084,27 @@
     (is (= :beam (get-in by-global ["added-beam-guid" :kind])))
     (is (= 4.0 (get-in by-global ["added-beam-guid" :geometry :depth])))))
 
+(deftest bim-ifc-facade-audits-edited-semantics-and-opaque-entities
+  (let [source (ifc/write-standard-spf (integrated-project))
+        external (string/replace
+                  source "\nENDSEC;\nEND-ISO-10303-21;"
+                  "\n#99999=IFCANNOTATION('vendor-audit',$,'Preserve Through BIM Edit',$,$,$,$);\nENDSEC;\nEND-ISO-10303-21;")
+        edit (fn [document]
+               (update document :ifc/elements
+                       (fn [elements]
+                         (mapv #(if (= "10" (:global-id %))
+                                  (assoc % :name "Audited Wall") %)
+                               elements))))
+        report (ifc/hybrid-roundtrip-report external edit)
+        corpus (ifc/hybrid-corpus-report {"bim-edit" {:text external :edit edit}})]
+    (is (:roundtrip/semantic-lossless? report))
+    (is (:roundtrip/opaque-lossless? report))
+    (is (:roundtrip/lossless? report))
+    (is (= :ifcannotation
+           (get-in report [:roundtrip/actual-opaque 99999 :type])))
+    (is (string/includes? (:roundtrip/output report) "Preserve Through BIM Edit"))
+    (is (:corpus/lossless? corpus))))
+
 (deftest imports-external-ifc-hierarchy-and-wall-geometry
   (let [document {:ifc/schema "IFC4X3_ADD2"
                   :ifc/project {:id 1 :global-id "project-guid" :name "Tower"

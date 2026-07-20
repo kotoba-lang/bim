@@ -12,3 +12,5 @@
 (def semantic-fingerprint ifc/semantic-fingerprint)
 (def roundtrip-report ifc/roundtrip-report)
 (def corpus-report ifc/corpus-report)
+(def hybrid-roundtrip-report ifc/hybrid-roundtrip-report)
+(def hybrid-corpus-report ifc/hybrid-corpus-report)
