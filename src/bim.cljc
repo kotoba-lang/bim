@@ -485,6 +485,77 @@
                                      :gross-volume-m3 (* area height)
                                      :net-volume-m3 (* area height)})})))
 
+(defn- signed-polygon-area [points]
+  (/ (reduce + (map (fn [[[x1 y1] [x2 y2]]] (- (* x1 y2) (* x2 y1)))
+                    (partition 2 1 (conj (vec points) (first points))))) 2.0))
+
+(defn enclosed-wall-boundaries
+  "Extract bounded plan faces from a wall endpoint graph using directed
+  half-edge traversal. The unbounded exterior face is excluded."
+  ([walls] (enclosed-wall-boundaries walls 1.0e-6))
+  ([walls tolerance]
+   (when-not (and (finite-number? tolerance) (pos? tolerance))
+     (throw (ex-info "room boundary tolerance must be positive" {:tolerance tolerance})))
+   (let [walls (filterv #(= :wall (:kind %)) walls)
+         key-of (fn [[x y z]] [(long (#?(:clj Math/round :cljs js/Math.round) (/ x tolerance)))
+                               (long (#?(:clj Math/round :cljs js/Math.round) (/ y tolerance)))
+                               (long (#?(:clj Math/round :cljs js/Math.round) (/ z tolerance)))])
+         endpoint-pairs (mapv #(get-in % [:geometry :axis]) walls)
+         node-points (into {} (mapcat (fn [[a b]] [[(key-of a) (vec a)] [(key-of b) (vec b)]])
+                                      endpoint-pairs))
+         edges (set (keep (fn [[a b]]
+                            (let [ka (key-of a) kb (key-of b)]
+                              (when (not= ka kb) #{ka kb}))) endpoint-pairs))
+         adjacency (reduce (fn [graph edge]
+                             (let [[a b] (vec edge)]
+                               (-> graph (update a (fnil conj #{}) b)
+                                   (update b (fnil conj #{}) a)))) {} edges)
+         angle (fn [from to]
+                 (let [[x1 y1] (get node-points from) [x2 y2] (get node-points to)]
+                   (#?(:clj Math/atan2 :cljs js/Math.atan2) (- y2 y1) (- x2 x1))))
+         ordered (into {} (map (fn [[node neighbors]]
+                                 [node (vec (sort-by #(angle node %) neighbors))]) adjacency))
+         next-edge (fn [[from at]]
+                     (let [neighbors (get ordered at)
+                           reverse-index (first (keep-indexed
+                                                 (fn [index node]
+                                                   (when (= node from) index)) neighbors))
+                           next-node (nth neighbors (mod (dec reverse-index) (count neighbors)))]
+                       [at next-node]))
+         directed (for [edge edges :let [[a b] (vec edge)] pair [[a b] [b a]]] pair)
+         visited (atom #{})
+         faces
+         (keep (fn [start-edge]
+                 (when-not (contains? @visited start-edge)
+                   (loop [edge start-edge path [] remaining (inc (* 2 (count edges)))]
+                     (cond
+                       (zero? remaining) nil
+                       (and (= edge start-edge) (seq path))
+                       (mapv node-points path)
+                       (contains? @visited edge) nil
+                       :else
+                       (do (swap! visited conj edge)
+                           (recur (next-edge edge) (conj path (first edge))
+                                  (dec remaining)))))))
+               directed)]
+     (->> faces
+          (filter #(> (signed-polygon-area %) (* tolerance tolerance)))
+          (sort-by (fn [boundary] [(- (polygon-area boundary)) (first boundary)]))
+          vec))))
+
+(defn rooms-from-walls
+  "Create one room per enclosed wall face using ordered identities."
+  [walls identities {:keys [height category] :or {height 3.0 category :other}}]
+  (let [boundaries (enclosed-wall-boundaries walls)]
+    (when (< (count identities) (count boundaries))
+      (throw (ex-info "room identities do not cover enclosed boundaries"
+                      {:required (count boundaries) :provided (count identities)})))
+    (mapv (fn [boundary {:keys [id name label]}]
+            (room-space {:id id :name (or name (str "Room " id))
+                         :label (or label (str id)) :category category
+                         :boundary boundary :height height}))
+          boundaries identities)))
+
 (defn add-space [proj storey-id new-space]
   (when-not (find-storey proj storey-id)
     (throw (ex-info "storey not found" {:storey-id storey-id})))

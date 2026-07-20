@@ -1870,3 +1870,25 @@
          (bim/add-opening-to-slab
           floor (bim/slab-opening
                  {:id 102 :boundary [[9 7 0] [11 7 0] [11 9 0] [9 9 0]]}))))))
+
+(deftest wall-half-edge-faces-create-adjacent-room-boundaries
+  (let [wall* (fn [id a b] (bim/wall {:id id :start a :end b}))
+        walls [(wall* 1 [0 0 0] [4 0 0]) (wall* 2 [4 0 0] [8 0 0])
+               (wall* 3 [8 0 0] [8 3 0])
+               (wall* 4 [8 3 0] [4 3 0]) (wall* 5 [4 3 0] [0 3 0])
+               (wall* 6 [0 3 0] [0 0 0]) (wall* 7 [4 0 0] [4 3 0])]
+        boundaries (bim/enclosed-wall-boundaries walls)
+        rooms (bim/rooms-from-walls
+               walls [{:id 201 :name "West"} {:id 202 :name "East"}]
+               {:height 3.0 :category :office})]
+    (is (= 2 (count boundaries)))
+    (is (every? #(< (#?(:clj Math/abs :cljs js/Math.abs)
+                       (- 12.0 (get-in % [:quantities :net-area-m2]))) 1.0e-12)
+                rooms))
+    (is (= #{"West" "East"} (set (map :name rooms))))
+    (is (= #{:office} (set (map :category rooms))))
+    (is (empty? (bim/enclosed-wall-boundaries (subvec (vec walls) 0 5))))
+    (is (thrown-with-msg?
+         #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+         #"identities"
+         (bim/rooms-from-walls walls [{:id 201}] {:height 3.0})))))
