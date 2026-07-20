@@ -647,6 +647,41 @@
                      #(vec (remove (fn [constraint] (= :fixed (:kind constraint))) %)))
           85 {:width 6.0 :height 3.0})))))
 
+(deftest sketch-angle-and-symmetry-constraints-solve-unknown-points
+  (let [half-pi (/ #?(:clj Math/PI :cljs js/Math.PI) 2.0)
+        family (integration/family-definition
+                {:id "angled-symmetric-profile" :name "Angled symmetric profile"
+                 :category :generic-model
+                 :parameters {:radius {:type :length :default 1.0}}
+                 :sketches
+                 {:profile
+                  {:points {:origin [0.0 0.0] :reference [2.0 0.0]
+                            :angled [nil nil] :mirror [nil nil]}
+                   :loop [:mirror :reference :angled]
+                   :constraints
+                   [{:kind :angle :vertex :origin :reference :reference
+                     :target :angled :angle half-pi :length [:param :radius]}
+                    {:kind :symmetric :left :reference :right :mirror
+                     :axis :x :value 0.0}]}}
+                 :template {:kind :proxy :name "Angled symmetric profile"
+                            :geometry {:kind :extruded-area-solid
+                                       :profile [:sketch-profile :profile]
+                                       :direction [0 0 1] :depth 0.2}}})
+        instance (integration/instantiate-family family 86 {:radius 1.5})
+        points (get-in instance [:geometry :profile :points])]
+    (is (= [-2.0 0.0] (first points)))
+    (is (= [2.0 0.0] (second points)))
+    (is (< (#?(:clj Math/abs :cljs js/Math.abs) (first (nth points 2))) 1.0e-9))
+    (is (< (#?(:clj Math/abs :cljs js/Math.abs) (- 1.5 (second (nth points 2))))
+           1.0e-9))
+    (is (= (first points) (last points)))
+    (is (thrown-with-msg?
+         #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+         #"inconsistent"
+         (integration/instantiate-family
+          (assoc-in family [:family/sketches :profile :points :angled] [1.0 1.0])
+          87 {:radius 1.5})))))
+
 (deftest adaptive-family-points-drive-freeform-path
   (let [family (integration/family-definition
                 {:id "adaptive-rail" :name "Adaptive Rail" :category :railing
