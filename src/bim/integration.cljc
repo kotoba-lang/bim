@@ -1996,16 +1996,77 @@
                          (if (= direction-a direction-b) (conj (pop path) point) (conj path point))))) [])))))
 
 (defn pressure-loss
-  "Darcy-Weisbach pressure loss for a circular segment."
-  [{:keys [length-m diameter-m roughness-m flow-m3-s density-kg-m3 viscosity-pa-s]}]
+  "Darcy-Weisbach pressure requirement for a circular segment, including
+  fitting/accessory minor losses and signed static elevation head."
+  [{:keys [length-m diameter-m roughness-m flow-m3-s density-kg-m3 viscosity-pa-s
+           minor-loss-coefficient elevation-change-m gravity-m-s2]
+    :or {minor-loss-coefficient 0.0 elevation-change-m 0.0 gravity-m-s2 9.80665}}]
   (let [area (* pi (/ (* diameter-m diameter-m) 4.0)) velocity (/ flow-m3-s area)
         reynolds (/ (* density-kg-m3 velocity diameter-m) viscosity-pa-s)
         friction (if (< reynolds 2300.0) (/ 64.0 reynolds)
                      (/ 0.25 (pow
                               (log10 (+ (/ roughness-m (* 3.7 diameter-m))
                                         (/ 5.74 (pow reynolds 0.9)))) 2.0)))
-        loss (* friction (/ length-m diameter-m) (/ (* density-kg-m3 velocity velocity) 2.0))]
-    {:mep/reynolds reynolds :mep/friction-factor friction :mep/pressure-loss-pa loss}))
+        velocity-pressure (/ (* density-kg-m3 velocity velocity) 2.0)
+        friction-loss (* friction (/ length-m diameter-m) velocity-pressure)
+        minor-loss (* minor-loss-coefficient velocity-pressure)
+        static-head (* density-kg-m3 gravity-m-s2 elevation-change-m)
+        loss (+ friction-loss minor-loss static-head)]
+    {:mep/reynolds reynolds :mep/friction-factor friction
+     :mep/velocity-m-s velocity :mep/friction-pressure-loss-pa friction-loss
+     :mep/minor-pressure-loss-pa minor-loss :mep/static-pressure-change-pa static-head
+     :mep/pressure-loss-pa loss}))
+
+(defn equipment-operating-point
+  "Solve the intersection of quadratic pump/fan and system curves. Pressure
+  curves use `p = shutoff - equipment-k*q²` and `p = static + system-k*q²`."
+  [{:keys [id kind shutoff-pressure-pa efficiency rated-flow-m3-s]
+    equipment-k :curve-coefficient}
+   {:keys [static-pressure-pa] system-k :curve-coefficient}]
+  (let [static-pressure (or static-pressure-pa 0.0)]
+    (when-not (and id (#{:pump :fan} kind)
+                   (number? shutoff-pressure-pa) (pos? shutoff-pressure-pa)
+                   (number? equipment-k) (not (neg? equipment-k))
+                   (number? system-k) (not (neg? system-k))
+                   (pos? (+ equipment-k system-k))
+                   (number? efficiency) (pos? efficiency) (<= efficiency 1.0))
+      (throw (ex-info "invalid pump/fan or system curve"
+                      {:equipment-id id :kind kind :equipment-k equipment-k
+                       :system-k system-k :efficiency efficiency})))
+    (when-not (> shutoff-pressure-pa static-pressure)
+      (throw (ex-info "equipment shutoff pressure does not exceed static head"
+                      {:equipment-id id :shutoff-pressure-pa shutoff-pressure-pa
+                       :static-pressure-pa static-pressure})))
+    (let [flow (sqrt (/ (- shutoff-pressure-pa static-pressure)
+                        (+ equipment-k system-k)))
+          pressure (+ static-pressure (* system-k flow flow))
+          power (/ (* flow pressure) efficiency)]
+      {:mep.equipment/id id :mep.equipment/kind kind
+       :mep.equipment/flow-m3-s flow :mep.equipment/pressure-pa pressure
+       :mep.equipment/input-power-w power :mep.equipment/efficiency efficiency
+       :mep.equipment/within-rated-flow?
+       (or (nil? rated-flow-m3-s) (<= flow rated-flow-m3-s))})))
+
+(defn select-mep-equipment
+  "Choose the lowest-input-power pump/fan whose operating point meets the
+  required flow and pressure and remains within its optional rated flow."
+  [catalog system-curve {:keys [required-flow-m3-s required-pressure-pa]}]
+  (let [candidates
+        (keep (fn [equipment]
+                (try
+                  (let [point (equipment-operating-point equipment system-curve)]
+                    (when (and (:mep.equipment/within-rated-flow? point)
+                               (>= (:mep.equipment/flow-m3-s point) required-flow-m3-s)
+                               (>= (:mep.equipment/pressure-pa point) required-pressure-pa))
+                      point))
+                  (catch #?(:clj clojure.lang.ExceptionInfo :cljs js/Error) _ nil)))
+              catalog)]
+    (when-not (seq candidates)
+      (throw (ex-info "no MEP equipment satisfies the design duty"
+                      {:required-flow-m3-s required-flow-m3-s
+                       :required-pressure-pa required-pressure-pa})))
+    (first (sort-by (juxt :mep.equipment/input-power-w
+                          (comp str :mep.equipment/id)) candidates))))
 
 (defn size-round-mep-segment
   "Select the minimum circular diameter for a design flow and velocity limit."
@@ -2096,7 +2157,11 @@
                       loss (pressure-loss
                             (merge fluid {:length-m (:length-m segment)
                                           :diameter-m (:mep/diameter-m sizing)
-                                          :flow-m3-s flow}))]
+                                          :flow-m3-s flow
+                                          :minor-loss-coefficient
+                                          (or (:minor-loss-coefficient segment) 0.0)
+                                          :elevation-change-m
+                                          (or (:elevation-change-m segment) 0.0)}))]
                   (merge segment sizing loss {:segment/flow-m3-s flow})))
               segments)
         sized-children (group-by :from sized)
