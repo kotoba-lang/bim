@@ -19,7 +19,8 @@
   already distinguishable scalar types.
 
   Depends on kotoba-lang/brep for element BREP geometry."
-  (:require [brep.polygon :as polygon]))
+  (:require [brep.polygon :as polygon]
+            [brep.spline :as spline]))
 
 ;; ── spatial hierarchy ──
 
@@ -566,74 +567,21 @@
                     :normal (local-vector->world frame normal)}))]
     (parametric-surface-mesh face u-range v-range 24 12 u-periodic? v-periodic? sample)))
 
-(defn- expanded-knots [knots multiplicities degree control-count]
-  (if (and (seq knots) (= (count knots) (count multiplicities)))
-    (vec (mapcat (fn [k multiplicity] (repeat multiplicity k)) knots multiplicities))
-    (let [interior-count (- control-count degree 1)
-          denominator (inc interior-count)]
-      (vec (concat (repeat (inc degree) 0.0)
-                   (map #(/ % denominator) (range 1 (inc interior-count)))
-                   (repeat (inc degree) 1.0))))))
-
-(defn- b-spline-basis [degree knots control-count parameter]
-  (let [last-parameter (nth knots control-count)
-        initial (mapv (fn [i]
-                        (if (or (and (<= (nth knots i) parameter)
-                                     (< parameter (nth knots (inc i))))
-                                (and (= parameter last-parameter)
-                                     (= i (dec control-count))))
-                          1.0 0.0))
-                      (range control-count))]
-    (loop [order 1 basis initial]
-      (if (> order degree)
-        basis
-        (recur
-         (inc order)
-         (mapv (fn [i]
-                 (let [left-denominator (- (nth knots (+ i order)) (nth knots i))
-                       right-denominator (- (nth knots (+ i order 1)) (nth knots (inc i)))
-                       left (if (zero? left-denominator) 0.0
-                                (* (/ (- parameter (nth knots i)) left-denominator)
-                                   (nth basis i)))
-                       right (if (or (zero? right-denominator) (= i (dec control-count))) 0.0
-                                 (* (/ (- (nth knots (+ i order 1)) parameter)
-                                       right-denominator)
-                                    (nth basis (inc i))))]
-                   (+ left right)))
-               (range control-count)))))))
-
-(defn- b-spline-surface-point [surface u-knots v-knots u v]
-  (let [control-points (:control-points surface)
-        u-count (count control-points) v-count (count (first control-points))
-        u-basis (b-spline-basis (:u-degree surface) u-knots u-count u)
-        v-basis (b-spline-basis (:v-degree surface) v-knots v-count v)
-        weights (or (:weights surface) (vec (repeat u-count (vec (repeat v-count 1.0)))))
-        terms (for [i (range u-count) j (range v-count)]
-                (let [coefficient (* (nth u-basis i) (nth v-basis j)
-                                     (get-in weights [i j]))]
-                  [coefficient (get-in control-points [i j])]))
-        denominator (reduce + (map first terms))]
-    (if (zero? denominator)
-      [0.0 0.0 0.0]
-      (mapv #(/ % denominator)
-            (reduce (fn [sum [coefficient point]]
-                      (mapv + sum (mapv #(* coefficient %) (point3 point))))
-                    [0.0 0.0 0.0] terms)))))
-
 (defn- b-spline-face-mesh [face]
   (let [surface (:surface face)
         u-count (count (:control-points surface))
         v-count (count (first (:control-points surface)))
-        u-knots (expanded-knots (:u-knots surface) (:u-multiplicities surface)
-                                (:u-degree surface) u-count)
-        v-knots (expanded-knots (:v-knots surface) (:v-multiplicities surface)
-                                (:v-degree surface) v-count)
-        u-range [(nth u-knots (:u-degree surface)) (nth u-knots u-count)]
-        v-range [(nth v-knots (:v-degree surface)) (nth v-knots v-count)]
+        u-knots (spline/expand-knots (:u-knots surface) (:u-multiplicities surface)
+                                    (:u-degree surface) u-count)
+        v-knots (spline/expand-knots (:v-knots surface) (:v-multiplicities surface)
+                                    (:v-degree surface) v-count)
+        u-range (spline/parameter-range (:u-degree surface) u-knots u-count)
+        v-range (spline/parameter-range (:v-degree surface) v-knots v-count)
         u-epsilon (* 1.0e-5 (- (second u-range) (first u-range)))
         v-epsilon (* 1.0e-5 (- (second v-range) (first v-range)))
         clamp (fn [value [lower upper]] (max lower (min upper value)))
-        point (fn [u v] (b-spline-surface-point surface u-knots v-knots u v))
+        spline-surface (assoc surface :u-knots u-knots :v-knots v-knots)
+        point (fn [u v] (spline/surface-point spline-surface u v))
         sample (fn [u v]
                  (let [position (point u v)
                        u0 (clamp (- u u-epsilon) u-range) u1 (clamp (+ u u-epsilon) u-range)
