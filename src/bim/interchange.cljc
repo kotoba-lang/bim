@@ -1,6 +1,7 @@
 (ns bim.interchange
   "BIM drawing export through shared kotoba-lang DXF and ISO PDF libraries."
   (:require [dxf.core :as dxf]
+            [bim.drawing :as drawing]
             [pdf.core :as pdf]))
 
 (defn- storey-extents [storey]
@@ -92,13 +93,29 @@
 (defn drawing-set-pdf
   "Export one vector PDF page per storey, suitable for archival or issue."
   ([storeys] (drawing-set-pdf storeys {}))
-  ([storeys {:keys [width height annotations-by-storey]
-             :or {width 842.0 height 595.0} :as options}]
-   (pdf/write-document
-    (mapv (fn [storey]
-            {:width width :height height
-             :content (floor-plan-pdf-content storey
-                                              (assoc options :page-height height
-                                                     :annotations
-                                                     (get annotations-by-storey (:id storey))))})
-          storeys))))
+  ([storeys {:keys [width height annotations-by-storey print-setting] :as options}]
+   (let [mm->points #(* % (/ 72.0 25.4))
+         paper (get drawing/sheet-sizes-mm
+                    (:print-setting/paper-size print-setting) [297 210])
+         portrait? (= :portrait (:print-setting/orientation print-setting))
+         [paper-width paper-height]
+         (if portrait? [(min (first paper) (second paper))
+                        (max (first paper) (second paper))]
+             [(max (first paper) (second paper))
+              (min (first paper) (second paper))])
+         width (or width (mm->points paper-width))
+         height (or height (mm->points paper-height))
+         denominator (:print-setting/scale print-setting)
+         scale (if (number? denominator) (/ (mm->points 1000.0) denominator)
+                   (or (:scale options) 40.0))
+         margin-mm (first (:print-setting/margins-mm print-setting))
+         margin (if (number? margin-mm) (mm->points margin-mm)
+                    (or (:margin options) 30.0))]
+     (pdf/write-document
+      (mapv (fn [storey]
+              {:width width :height height
+               :content (floor-plan-pdf-content
+                         storey (assoc options :page-height height :scale scale :margin margin
+                                       :annotations
+                                       (get annotations-by-storey (:id storey))))})
+            storeys)))))

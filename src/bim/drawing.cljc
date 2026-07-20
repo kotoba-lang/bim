@@ -36,6 +36,29 @@
 (defn- category-override [options element defaults]
   (merge defaults (get (:category-overrides options) (:kind element))))
 
+(defn- element-z-range [element]
+  (let [points (concat (get-in element [:geometry :axis])
+                       (get-in element [:geometry :boundary]))
+        zs (keep #(when (and (sequential? %) (number? (nth % 2 nil))) (nth % 2)) points)
+        base (if (seq zs) (reduce min zs)
+                 (or (get-in element [:placement :location 2]) 0.0))
+        top (case (:kind element)
+              :wall (+ base (or (get-in element [:geometry :profile :height]) 0.0))
+              :slab (+ base (or (get-in element [:geometry :thickness])
+                                (:thickness element) 0.0))
+              (if (seq zs) (reduce max zs) base))]
+    [base top]))
+
+(defn- plan-visible? [options element]
+  (if-let [{:keys [top view-depth]} (:view-range options)]
+    (let [[element-bottom element-top] (element-z-range element)]
+      (and (<= element-bottom top) (>= element-top view-depth)))
+    true))
+
+(defn- plan-cut? [options element]
+  (when-let [cut-plane (get-in options [:view-range :cut-plane])]
+    (let [[bottom top] (element-z-range element)] (<= bottom cut-plane top))))
+
 (defn- annotation-groups [annotations sx sy style]
   (mapv
    (fn [annotation]
@@ -104,9 +127,11 @@
 (defn floor-plan
   ([storey] (floor-plan storey {}))
   ([storey {:keys [scale margin] :or {scale 60 margin 40} :as options}]
-   (let [walls (filter #(and (= :wall (:kind %)) (category-visible? options %))
+   (let [walls (filter #(and (= :wall (:kind %)) (category-visible? options %)
+                             (plan-visible? options %))
                        (:elements storey))
-         slabs (filter #(and (= :slab (:kind %)) (category-visible? options %))
+         slabs (filter #(and (= :slab (:kind %)) (category-visible? options %)
+                             (plan-visible? options %))
                        (:elements storey))
          points (concat (mapcat #(get-in % [:geometry :axis]) walls)
                         (mapcat #(get-in % [:geometry :boundary]) slabs))
@@ -132,7 +157,8 @@
                (shapes/line (sx x1) (sy y1) (sx x2) (sy y2)
                             (category-override
                              options wall
-                             {:stroke "#111827"
+                             {:class (if (plan-cut? options wall) "cut-element" "projected-element")
+                              :stroke "#111827"
                               :stroke-width (max 2 (* scale (get-in wall [:geometry :profile :thickness])))}))))))))
 
 (defn floor-plan-svg
@@ -145,7 +171,8 @@
   ([storey] (documented-floor-plan storey {}))
   ([storey {:keys [scale margin show-tags? annotations annotation-style]
              :or {scale 60 margin 60 show-tags? true} :as options}]
-   (let [walls (filter #(and (= :wall (:kind %)) (category-visible? options %))
+   (let [walls (filter #(and (= :wall (:kind %)) (category-visible? options %)
+                             (plan-visible? options %))
                        (:elements storey))
          points (mapcat #(get-in % [:geometry :axis]) walls)
          {:keys [min max]} (bounds-2d points) [min-x min-y] min [max-x max-y] max
@@ -309,14 +336,27 @@
 (defn detail-view-svg [building options]
   (svg/render (detail-view building options)))
 
-(def sheet-sizes-mm {:a0 [1189 841] :a1 [841 594] :a2 [594 420] :a3 [420 297]})
+(def sheet-sizes-mm {:a0 [1189 841] :a1 [841 594] :a2 [594 420] :a3 [420 297]
+                     :a4 [297 210] :letter [279.4 215.9] :legal [355.6 215.9]
+                     :tabloid [431.8 279.4]})
 
 (defn drawing-sheet
   "Compose renderable SVG views into a sheet with viewport frames and title block."
-  [{:keys [number name size revision viewports]
+  [{:keys [number name size revision viewports print-setting]
     :or {number "A-001" name "Drawing Sheet" size :a1 revision "P01"}}]
-  (let [[width height] (get sheet-sizes-mm size (get sheet-sizes-mm :a1))]
-    (apply svg/svg {:viewBox (str "0 0 " width " " height) :data-sheet-number number}
+  (let [paper-size (or (:print-setting/paper-size print-setting) size)
+        [paper-width paper-height] (get sheet-sizes-mm paper-size (get sheet-sizes-mm :a1))
+        portrait? (= :portrait (:print-setting/orientation print-setting))
+        [width height] (if portrait?
+                         [(min paper-width paper-height) (max paper-width paper-height)]
+                         [(max paper-width paper-height) (min paper-width paper-height)])]
+    (apply svg/svg (cond-> {:viewBox (str "0 0 " width " " height)
+                            :data-sheet-number number}
+                     print-setting
+                     (assoc :data-print-setting (:print-setting/id print-setting)
+                            :data-paper-size (clojure.core/name paper-size)
+                            :data-orientation (clojure.core/name
+                                               (:print-setting/orientation print-setting))))
            (concat
             [(shapes/rect 0 0 width height {:fill "white" :stroke "#111827"})]
             (for [{:keys [view x y width height title scale]

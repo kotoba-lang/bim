@@ -38,11 +38,18 @@
                       :revision "C01" :annotation/id :revision-1}]
         dxf (interchange/floor-plan-dxf storey {:annotations annotations})
         bytes (interchange/drawing-set-pdf
-               [storey] {:annotations-by-storey {1 annotations}})
+               [storey] {:annotations-by-storey {1 annotations}
+                         :print-setting {:print-setting/paper-size :a3
+                                         :print-setting/orientation :portrait
+                                         :print-setting/scale 100
+                                         :print-setting/margins-mm [5 5 5 5]}})
         parsed (pdf/parse bytes)
-        text (pdf/page-text (:objects parsed) (first (pdf/pages parsed)))]
+        page (first (pdf/pages parsed))
+        text (pdf/page-text (:objects parsed) page)]
     (is (string/includes? dxf "8\nA-DIMS"))
     (is (string/includes? dxf "8\nA-REVS"))
     (is (string/includes? dxf "Rated wall"))
     (is (some #{"6000"} text))
-    (is (some #{"Rated wall"} text))))
+    (is (some #{"Rated wall"} text))
+    (is (< 840 (get-in page [:MediaBox 2]) 843))
+    (is (< 1190 (get-in page [:MediaBox 3]) 1192))))
