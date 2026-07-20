@@ -2493,9 +2493,10 @@
                  :structural.overlay/color color}))
             (:structural/members model))})))
 
-(defn mep-system [{:keys [id name kind medium design-flow segments equipment]}]
+(defn mep-system [{:keys [id name kind medium design-flow segments fittings equipment]}]
   {:mep/id id :mep/name name :mep/kind kind :mep/medium medium
    :mep/design-flow design-flow :mep/segments (vec segments)
+   :mep/fittings (vec fittings)
    :mep/equipment (vec equipment)})
 
 (defn mep-connector [{:keys [id point direction domain shape size flow-direction connected-to]}]
@@ -2639,6 +2640,29 @@
                              direction-a (mapv #(compare %2 %1) a b)
                              direction-b (mapv #(compare %2 %1) b point)]
                          (if (= direction-a direction-b) (conj (pop path) point) (conj path point))))) [])))))
+
+(defn grade-mep-route
+  "Apply a constant gravity slope to a routed path using cumulative horizontal
+  run. Positive slope falls in the route direction unless `:rise` is requested."
+  ([points slope] (grade-mep-route points slope {}))
+  ([points slope {:keys [direction] :or {direction :fall}}]
+   (when-not (and (<= 2 (count points)) (number? slope) (<= 0 slope)
+                  (every? #(and (= 3 (count %)) (every? number? %)) points)
+                  (contains? #{:fall :rise} direction))
+     (throw (ex-info "graded MEP route requires 3D points and non-negative slope"
+                     {:slope slope :direction direction})))
+   (let [start-z (nth (first points) 2)
+         sign (if (= :fall direction) -1.0 1.0)]
+     (loop [result [(vec (first points))] remaining (rest points) run 0.0]
+       (if-let [point (first remaining)]
+         (let [previous (peek result)
+               dx (- (nth point 0) (nth previous 0))
+               dy (- (nth point 1) (nth previous 1))
+               next-run (+ run (sqrt (+ (* dx dx) (* dy dy))))]
+           (recur (conj result [(nth point 0) (nth point 1)
+                                (+ start-z (* sign slope next-run))])
+                  (rest remaining) next-run))
+         result)))))
 
 (defn pressure-loss
   "Darcy-Weisbach pressure requirement for a circular segment, including
@@ -2841,7 +2865,10 @@
   (when-let [issues (seq (validate-mep-system system))]
     (throw (ex-info "invalid MEP system" {:issues issues})))
   (let [flow (:mep/design-flow system)
-        connectors (mapcat :mep/connectors (:mep/segments system))
+        connectors (mapcat :mep/connectors
+                           (concat (:mep/segments system)
+                                   (:mep/fittings system)
+                                   (:mep/equipment system)))
         graph (into {} (map (fn [connector]
                               [(:connector/id connector)
                                (vec (keep identity [(:connector/connected-to connector)]))])
@@ -2868,10 +2895,13 @@
   links, incompatible domains/shapes/sizes, and invalid flow direction pairs."
   [system]
   (let [ids (set (map :id (:mep/segments system)))
-        connectors (mapcat (fn [segment]
-                             (map #(assoc % :connector/segment (:id segment))
-                                  (:mep/connectors segment)))
-                           (:mep/segments system))
+        connector-owners (concat (:mep/segments system)
+                                 (:mep/fittings system)
+                                 (:mep/equipment system))
+        connectors (mapcat (fn [owner]
+                             (map #(assoc % :connector/owner (:id owner))
+                                  (:mep/connectors owner)))
+                           connector-owners)
         connector-by-id (into {} (map (juxt :connector/id identity) connectors))
         segment-issues
         (mapcat (fn [segment]
