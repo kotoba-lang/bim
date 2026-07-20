@@ -2,7 +2,10 @@
   "Restoration-fidelity tests — one per original kami-bim Rust test
   (kami-engine/kami-bim/src/lib.rs `mod tests`, deleted PR #82)."
   (:require [clojure.test :refer [deftest is testing]]
-            [bim]))
+            [bim]
+            [bim.integration :as integration]
+            [bim.ifc :as ifc]
+            [bim.drawing :as drawing]))
 
 (deftest namespace-loads
   (testing "the restored CLJC namespace loads"
@@ -107,3 +110,74 @@
     (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error) (bim/add-storey added 2 level-1)))
     (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
                  (bim/delete-storey (bim/add-element added 4 (bim/slab {:id 40 :boundary [[0 0 3.2] [1 0 3.2] [1 1 3.2] [0 1 3.2]]})) 2 4)))))
+
+(defn integrated-project []
+  (let [ground (bim/storey {:id 3 :name "Ground" :elevation 0 :height 3.2
+                            :placement :identity :spaces [] :elements []})]
+    (-> (bim/project "Integrated Tower")
+        (assoc :id "tower-01")
+        (update :sites conj
+                (bim/site {:id 1 :name "Site" :placement :identity
+                           :buildings [(bim/building {:id 2 :name "Tower" :placement :identity
+                                                      :reference-elevation 0 :storeys [ground]})]}))
+        (bim/add-element 3 (bim/wall {:id 10 :start [0 0 0] :end [8 0 0]})))))
+
+(deftest parametric-family-instantiation
+  (let [family (integration/family-definition
+                {:id "door-single" :name "Single Door" :category :door
+                 :parameters {:width {:type :length :default 0.9}
+                              :height {:type :length :default 2.1}}
+                 :formulas {:area [:* [:param :width] [:param :height]]}
+                 :template {:kind :door :name "Single Door"
+                            :geometry {:width [:param :width] :height [:param :height]}
+                            :quantities {:gross-area-m2 [:param :area]}}})
+        door (integration/instantiate-family family 20 {:width 1.2})]
+    (is (= 1.2 (get-in door [:geometry :width])))
+    (is (= 2.1 (get-in door [:geometry :height])))
+    (is (== 2.52 (get-in door [:quantities :gross-area-m2])))
+    (is (= "door-single" (:family/id door)))))
+
+(deftest drawings-ifc-collaboration-and-itonami-contract
+  (let [project (integrated-project)
+        drawings (integration/generate-drawing-set project)
+        ifc (integration/export-ifc project)
+        event (integration/change-event {:id "e1" :actor "architect-a" :clock 1
+                                         :operation :assoc :path [:description]
+                                         :value "Issued for coordination"})
+        changed (integration/merge-events project [event])
+        payload (integration/cloud-itonami-payload changed 7)]
+    (is (= :floor-plan (get-in drawings [:drawing/views 0 :view/kind])))
+    (is (= project (integration/import-ifc ifc)))
+    (is (= :wall (get-in ifc [:ifc/elements 0 :kind])))
+    (is (= "Issued for coordination" (:description changed)))
+    (is (= :design/revision-published (:itonami/event payload)))
+    (is (= "Ss_25_10" (get-in payload [:design/line-items 0 :classification/code])))
+    (is (= 7 (:design/revision payload)))))
+
+(deftest structural-and-mep-federation
+  (let [project (integrated-project)
+        beam (integration/structural-member
+              (bim/element {:id 30 :kind :beam :name "B1"})
+              {:role :beam :analytical-axis [[0 0 3] [8 0 3]]
+               :section {:kind :i-shape :designation "H-300x150"}
+               :material "S355" :loads [{:case :dead :kn-m 12.0}]})
+        system (integration/mep-system
+                {:id "supply-air" :name "Supply Air" :kind :hvac :medium :air
+                 :design-flow 2.4
+                 :segments [{:id 50 :connected-to [51]}]})
+        federation (integration/federated-design
+                    {:architectural project :structural [beam] :mep [system]})]
+    (is (= :structural (:discipline beam)))
+    (is (= :hvac (get-in federation [:federation/mep 0 :mep/kind])))
+    (is (= :mep/dangling-connection
+           (get-in federation [:federation/issues 0 :issue/type])))))
+
+(deftest ifc-spf-and-svg-deliverables
+  (let [project (integrated-project)
+        spf (ifc/write-spf project)
+        svg (drawing/floor-plan-svg (bim/find-storey project 3))]
+    (is (.startsWith spf "ISO-10303-21;"))
+    (is (re-find #"IFCWALL" spf))
+    (is (= project (ifc/read-spf spf)))
+    (is (re-find #"<svg" svg))
+    (is (re-find #"<line" svg))))
