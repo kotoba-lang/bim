@@ -18,7 +18,8 @@
   original's `#[serde(untagged)]` enum wrapper since both cases are
   already distinguishable scalar types.
 
-  Depends on kotoba-lang/brep for element BREP geometry.")
+  Depends on kotoba-lang/brep for element BREP geometry."
+  (:require [brep.polygon :as polygon]))
 
 ;; ── spatial hierarchy ──
 
@@ -388,16 +389,35 @@
         length (sqrt (+ (* nx nx) (* ny ny) (* nz nz)))]
     (if (pos? length) [(/ nx length) (/ ny length) (/ nz length)] [0.0 0.0 0.0])))
 
+(defn- planar-projector [normal]
+  (let [[nx ny nz] (mapv #(#?(:clj Math/abs :cljs js/Math.abs) %) normal)]
+    (cond
+      (and (>= nx ny) (>= nx nz)) (fn [[_ y z]] [y z])
+      (>= ny nz) (fn [[x _ z]] [x z])
+      :else (fn [[x y _]] [x y]))))
+
+(defn- planar-rings-mesh [rings]
+  (when (and (seq rings) (>= (count (first rings)) 3))
+    (let [desired-normal (face-normal (take 3 (first rings)))
+          result (polygon/triangulate-rings rings (planar-projector desired-normal))
+          vertices (:vertices result) indices (:indices result)
+          actual-normal (when (>= (count indices) 3)
+                          (face-normal (map #(nth vertices %) (take 3 indices))))
+          indices (if (and actual-normal (neg? (reduce + (map * desired-normal actual-normal))))
+                    (vec (mapcat (fn [[a b c]] [a c b]) (partition 3 indices))) indices)]
+      (when (seq indices)
+        {:positions vertices :indices indices
+         :normals (vec (repeat (count vertices) desired-normal))}))))
+
 (defn- faceted-brep-mesh [geometry]
   (let [face-meshes
         (keep (fn [face]
-                (when-let [bound (first (filter #(= :outer (:kind %)) (:bounds face)))]
-                  (let [points (cond-> (vec (:points bound)) (false? (:orientation bound)) reverse)
-                        points (vec points) n (count points)]
-                    (when (>= n 3)
-                      {:positions points
-                       :indices (vec (mapcat (fn [i] [0 i (inc i)]) (range 1 (dec n))))
-                       :normals (vec (repeat n (face-normal (take 3 points))))}))))
+                (let [ordered (sort-by #(if (= :outer (:kind %)) 0 1) (:bounds face))
+                      rings (mapv (fn [bound]
+                                    (cond-> (vec (:points bound))
+                                      (false? (:orientation bound)) reverse))
+                                  ordered)]
+                  (planar-rings-mesh rings)))
               (:faces geometry))]
     (when (seq face-meshes) (merge-meshes face-meshes))))
 
@@ -409,10 +429,16 @@
        :normals (vec (repeat (count points) (face-normal (take 3 points))))})))
 
 (defn- tessellated-mesh [geometry]
-  (let [indices (case (:kind geometry)
-                  :triangulated-face-set (:coord-indices geometry)
-                  :polygonal-face-set (map :outer (:faces geometry)))
-        meshes (keep #(indexed-face-mesh (:coordinates geometry) %) indices)]
+  (let [meshes (case (:kind geometry)
+                 :triangulated-face-set
+                 (keep #(indexed-face-mesh (:coordinates geometry) %) (:coord-indices geometry))
+                 :polygonal-face-set
+                 (keep (fn [face]
+                         (let [rings (mapv (fn [indices]
+                                             (mapv #(nth (:coordinates geometry) (dec %)) indices))
+                                           (cons (:outer face) (:inners face)))]
+                           (planar-rings-mesh rings)))
+                       (:faces geometry)))]
     (when (seq meshes) (merge-meshes meshes))))
 
 (defn- v3-sub [a b] (mapv - a b))
