@@ -1,7 +1,7 @@
 {:paths ["src" "test"]
  :deps {io.github.kotoba-lang/org-iso-16739
         {:git/url "https://github.com/kotoba-lang/org-iso-16739.git"
-         :git/sha "c84d04c3b2e84fdc0e7a079ed96338a5ce753d1e"}
+         :git/sha "30d19a477bc90f06eb873e3de6e219c2eb8cd666"}
         io.github.kotoba-lang/kotoba-issue
         {:git/url "https://github.com/kotoba-lang/kotoba-issue.git"
          :git/sha "32babb844edd057717df4fbe4cc763fcd91d662e"}
