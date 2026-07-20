@@ -7,6 +7,12 @@
             [kotoba.document.change :as document-change]))
 
 (def schema-version 1)
+(def ^:private pi #?(:clj Math/PI :cljs js/Math.PI))
+(defn- sqrt [value] (#?(:clj Math/sqrt :cljs js/Math.sqrt) value))
+(defn- math-abs [value] (#?(:clj Math/abs :cljs js/Math.abs) value))
+(defn- pow [value exponent] (#?(:clj Math/pow :cljs js/Math.pow) value exponent))
+(defn- log10 [value] (#?(:clj Math/log10 :cljs js/Math.log10) value))
+(defn- round [value] (#?(:clj Math/round :cljs js/Math.round) value))
 
 (defn family-definition
   [{:keys [id name category parameters formulas constraints types template]}]
@@ -462,6 +468,145 @@
 (defn import-ifc-spf [text]
   (import-external-ifc (ifc/read-document text)))
 
+(defn structural-node [{:keys [id point restraints]}]
+  {:structural.node/id id :structural.node/point (vec point)
+   :structural.node/restraints (vec (or restraints [false false]))})
+
+(defn structural-analysis-member
+  [{:keys [id start-node end-node area-m2 elastic-modulus-pa section material]}]
+  {:structural.member/id id :structural.member/start-node start-node
+   :structural.member/end-node end-node :structural.member/area-m2 area-m2
+   :structural.member/elastic-modulus-pa elastic-modulus-pa
+   :structural.member/section section :structural.member/material material})
+
+(defn structural-load-case [{:keys [id name kind nodal-loads]}]
+  {:structural.load-case/id id :structural.load-case/name name
+   :structural.load-case/kind (or kind :service)
+   :structural.load-case/nodal-loads (vec nodal-loads)})
+
+(defn structural-model [{:keys [nodes members load-cases]}]
+  {:structural/schema-version schema-version :structural/nodes (vec nodes)
+   :structural/members (vec members) :structural/load-cases (vec load-cases)})
+
+(defn validate-structural-model [model]
+  (let [nodes (into {} (map (juxt :structural.node/id identity) (:structural/nodes model)))]
+    (vec
+     (mapcat (fn [member]
+               (let [start (nodes (:structural.member/start-node member))
+                     end (nodes (:structural.member/end-node member))]
+                 (cond
+                   (nil? start) [{:issue/type :structural/missing-node
+                                  :issue/member (:structural.member/id member)
+                                  :issue/node (:structural.member/start-node member)}]
+                   (nil? end) [{:issue/type :structural/missing-node
+                                :issue/member (:structural.member/id member)
+                                :issue/node (:structural.member/end-node member)}]
+                   (= (:structural.node/point start) (:structural.node/point end))
+                   [{:issue/type :structural/zero-length-member
+                     :issue/member (:structural.member/id member)}]
+                   :else [])))
+             (:structural/members model)))))
+
+(defn- solve-linear-system [matrix values]
+  (let [n (count values)]
+    (loop [column 0 matrix (mapv vec matrix) values (vec values)]
+      (if (= column n)
+        (loop [row (dec n) solution (vec (repeat n 0.0))]
+          (if (neg? row)
+            solution
+            (let [known (reduce + (map (fn [j] (* (get-in matrix [row j]) (nth solution j)))
+                                       (range (inc row) n)))
+                  value (/ (- (nth values row) known) (get-in matrix [row row]))]
+              (recur (dec row) (assoc solution row value)))))
+        (let [pivot-row (apply max-key
+                               #(math-abs (double (get-in matrix [% column])))
+                               (range column n))
+              matrix (assoc matrix column (nth matrix pivot-row) pivot-row (nth matrix column))
+              values (assoc values column (nth values pivot-row) pivot-row (nth values column))
+              pivot (get-in matrix [column column])]
+          (when (< (math-abs (double pivot)) 1.0e-12)
+            (throw (ex-info "structural stiffness matrix is singular" {:dof column})))
+          (let [[matrix values]
+                (reduce (fn [[m v] row]
+                          (let [factor (/ (get-in m [row column]) pivot)]
+                            [(assoc m row
+                                    (mapv - (nth m row) (mapv #(* factor %) (nth m column))))
+                             (assoc v row (- (nth v row) (* factor (nth v column))))]))
+                        [matrix values] (range (inc column) n))]
+            (recur (inc column) matrix values)))))))
+
+(defn analyze-2d-truss
+  "Linear-elastic small-displacement 2D truss analysis. Loads are Newtons,
+  coordinates metres, E Pascals, and results contain metre displacements and
+  signed axial member forces in Newtons."
+  [model load-case-id]
+  (when-let [issues (seq (validate-structural-model model))]
+    (throw (ex-info "invalid structural model" {:issues issues})))
+  (let [nodes (:structural/nodes model) node-index (into {} (map-indexed #(vector (:structural.node/id %2) %1) nodes))
+        node-by-id (into {} (map (juxt :structural.node/id identity) nodes))
+        dof-count (* 2 (count nodes))
+        empty-matrix (vec (repeat dof-count (vec (repeat dof-count 0.0))))
+        stiffness
+        (reduce (fn [matrix member]
+                  (let [a (node-by-id (:structural.member/start-node member))
+                        b (node-by-id (:structural.member/end-node member))
+                        [ax ay] (:structural.node/point a) [bx by] (:structural.node/point b)
+                        dx (- bx ax) dy (- by ay) length (sqrt (+ (* dx dx) (* dy dy)))
+                        c (/ dx length) s (/ dy length)
+                        factor (/ (* (:structural.member/area-m2 member)
+                                     (:structural.member/elastic-modulus-pa member)) length)
+                        local (mapv #(mapv (fn [value] (* factor value)) %)
+                                    [[(* c c) (* c s) (- (* c c)) (- (* c s))]
+                                     [(* c s) (* s s) (- (* c s)) (- (* s s))]
+                                     [(- (* c c)) (- (* c s)) (* c c) (* c s)]
+                                     [(- (* c s)) (- (* s s)) (* c s) (* s s)]])
+                        ai (* 2 (node-index (:structural.node/id a)))
+                        bi (* 2 (node-index (:structural.node/id b))) dofs [ai (inc ai) bi (inc bi)]]
+                    (reduce (fn [result [i j]]
+                              (update-in result [(nth dofs i) (nth dofs j)] + (get-in local [i j])))
+                            matrix (for [i (range 4) j (range 4)] [i j]))))
+                empty-matrix (:structural/members model))
+        load-case (first (filter #(= load-case-id (:structural.load-case/id %))
+                                 (:structural/load-cases model)))
+        loads (reduce (fn [result {:keys [node fx fy]}]
+                        (let [index (* 2 (node-index node))]
+                          (-> result (update index + (or fx 0.0)) (update (inc index) + (or fy 0.0)))))
+                      (vec (repeat dof-count 0.0)) (:structural.load-case/nodal-loads load-case))
+        fixed (into #{} (mapcat (fn [[index node]]
+                                  (keep-indexed (fn [axis restrained?]
+                                                  (when restrained? (+ (* 2 index) axis)))
+                                                (:structural.node/restraints node)))
+                                (map-indexed vector nodes)))
+        free (vec (remove fixed (range dof-count)))
+        reduced-matrix (mapv (fn [i] (mapv #(get-in stiffness [i %]) free)) free)
+        reduced-loads (mapv #(nth loads %) free)
+        reduced-displacements (solve-linear-system reduced-matrix reduced-loads)
+        displacements (reduce (fn [result [dof value]] (assoc result dof value))
+                              (vec (repeat dof-count 0.0)) (map vector free reduced-displacements))
+        member-forces
+        (into {} (map (fn [member]
+                        (let [a (node-by-id (:structural.member/start-node member))
+                              b (node-by-id (:structural.member/end-node member))
+                              [ax ay] (:structural.node/point a) [bx by] (:structural.node/point b)
+                              dx (- bx ax) dy (- by ay) length (sqrt (+ (* dx dx) (* dy dy)))
+                              c (/ dx length) s (/ dy length)
+                              ai (* 2 (node-index (:structural.node/id a)))
+                              bi (* 2 (node-index (:structural.node/id b)))
+                              extension (+ (* c (- (nth displacements bi) (nth displacements ai)))
+                                           (* s (- (nth displacements (inc bi))
+                                                   (nth displacements (inc ai)))))
+                              force (* (/ (* (:structural.member/area-m2 member)
+                                               (:structural.member/elastic-modulus-pa member)) length)
+                                       extension)]
+                          [(:structural.member/id member) force]))
+                      (:structural/members model)))]
+    {:structural.analysis/load-case load-case-id
+     :structural.analysis/displacements
+     (into {} (map-indexed (fn [index node]
+                             [(:structural.node/id node)
+                              [(nth displacements (* 2 index)) (nth displacements (inc (* 2 index)))]]) nodes))
+     :structural.analysis/member-axial-forces member-forces}))
+
 (defn structural-member
   "Attach an analytical line, section and load-bearing role to a BIM element."
   [element {:keys [role analytical-axis section material loads]}]
@@ -474,16 +619,123 @@
   {:mep/id id :mep/name name :mep/kind kind :mep/medium medium
    :mep/design-flow design-flow :mep/segments (vec segments)})
 
+(defn mep-connector [{:keys [id point direction domain shape size flow-direction connected-to]}]
+  {:connector/id id :connector/point (vec point) :connector/direction (vec direction)
+   :connector/domain domain :connector/shape shape :connector/size size
+   :connector/flow-direction flow-direction :connector/connected-to connected-to})
+
+(defn mep-segment
+  [{:keys [id name kind start end diameter width height system-id connectors connected-to]}]
+  (let [radius (when diameter (/ diameter 2.0))]
+    {:id id :kind :mep-segment :name (or name (str "MEP " id)) :discipline :mep
+     :mep/kind kind :mep/system-id system-id :mep/connectors (vec connectors)
+     :geometry (if radius
+                 {:kind :swept-disk-solid :directrix [start end] :radius radius}
+                 {:kind :extruded-area-solid
+                  :profile {:kind :rectangle :x-dim width :y-dim height}
+                  :position {:location start} :direction (mapv - end start)
+                  :depth (sqrt (reduce + (map (fn [a b] (let [d (- b a)] (* d d))) start end)))})
+     :connected-to (vec connected-to)}))
+
+(defn route-mep
+  "Route an orthogonal path on a 3D grid while avoiding expanded AABB obstacles."
+  [start end obstacles {:keys [step clearance max-nodes]
+                        :or {step 0.5 clearance 0.1 max-nodes 100000}}]
+  (let [grid #(mapv (fn [value] (long (round (/ value step)))) %)
+        world #(mapv (fn [value] (* step value)) %)
+        start-grid (grid start) end-grid (grid end)
+        blocked? (fn [node]
+                   (let [point (world node)]
+                     (some (fn [{:keys [min max]}]
+                             (every? true? (map (fn [value lower upper]
+                                                 (<= (- lower clearance) value (+ upper clearance)))
+                                               point min max))) obstacles)))
+        all-points (concat [start-grid end-grid] (mapcat #(map grid [(:min %) (:max %)]) obstacles))
+        lower (mapv #(- (reduce min %) 4) (apply map vector all-points))
+        upper (mapv #(+ (reduce max %) 4) (apply map vector all-points))
+        directions [[1 0 0] [-1 0 0] [0 1 0] [0 -1 0] [0 0 1] [0 0 -1]]
+        inside? (fn [node] (every? true? (map <= lower node upper)))
+        result
+        (loop [queue [start-grid] cursor 0 came {start-grid nil}]
+          (cond
+            (>= cursor (count queue)) nil
+            (> (count came) max-nodes) nil
+            :else
+            (let [current (nth queue cursor)]
+              (if (= current end-grid)
+                (loop [node current path []]
+                  (if node (recur (came node) (conj path node)) (vec (reverse path))))
+                (let [next-nodes (filter #(and (inside? %) (not (blocked? %))
+                                               (not (contains? came %)))
+                                         (map #(mapv + current %) directions))]
+                  (recur (into queue next-nodes) (inc cursor)
+                         (reduce #(assoc %1 %2 current) came next-nodes)))))))]
+    (when result
+      (->> result
+           (mapv world)
+           (reduce (fn [path point]
+                     (if (< (count path) 2)
+                       (conj path point)
+                       (let [a (nth path (- (count path) 2)) b (peek path)
+                             direction-a (mapv #(compare %2 %1) a b)
+                             direction-b (mapv #(compare %2 %1) b point)]
+                         (if (= direction-a direction-b) (conj (pop path) point) (conj path point))))) [])))))
+
+(defn pressure-loss
+  "Darcy-Weisbach pressure loss for a circular segment."
+  [{:keys [length-m diameter-m roughness-m flow-m3-s density-kg-m3 viscosity-pa-s]}]
+  (let [area (* pi (/ (* diameter-m diameter-m) 4.0)) velocity (/ flow-m3-s area)
+        reynolds (/ (* density-kg-m3 velocity diameter-m) viscosity-pa-s)
+        friction (if (< reynolds 2300.0) (/ 64.0 reynolds)
+                     (/ 0.25 (pow
+                              (log10 (+ (/ roughness-m (* 3.7 diameter-m))
+                                        (/ 5.74 (pow reynolds 0.9)))) 2.0)))
+        loss (* friction (/ length-m diameter-m) (/ (* density-kg-m3 velocity velocity) 2.0))]
+    {:mep/reynolds reynolds :mep/friction-factor friction :mep/pressure-loss-pa loss}))
+
 (defn validate-mep-system
-  "Return portable coordination issues for dangling segment connections."
+  "Return coordination issues for dangling segments/connectors, non-reciprocal
+  links, incompatible domains/shapes/sizes, and invalid flow direction pairs."
   [system]
-  (let [ids (set (map :id (:mep/segments system)))]
-    (vec
-     (mapcat (fn [segment]
-               (for [target (:connected-to segment) :when (not (contains? ids target))]
-                 {:issue/type :mep/dangling-connection :issue/segment (:id segment)
-                  :issue/target target :issue/system (:mep/id system)}))
-             (:mep/segments system)))))
+  (let [ids (set (map :id (:mep/segments system)))
+        connectors (mapcat (fn [segment]
+                             (map #(assoc % :connector/segment (:id segment))
+                                  (:mep/connectors segment)))
+                           (:mep/segments system))
+        connector-by-id (into {} (map (juxt :connector/id identity) connectors))
+        segment-issues
+        (mapcat (fn [segment]
+                  (for [target (:connected-to segment) :when (not (contains? ids target))]
+                    {:issue/type :mep/dangling-connection :issue/segment (:id segment)
+                     :issue/target target :issue/system (:mep/id system)}))
+                (:mep/segments system))
+        connector-issues
+        (mapcat
+         (fn [connector]
+           (when-let [target-id (:connector/connected-to connector)]
+             (let [target (connector-by-id target-id)]
+               (cond
+                 (nil? target)
+                 [{:issue/type :mep/dangling-connector :issue/connector (:connector/id connector)
+                   :issue/target target-id :issue/system (:mep/id system)}]
+                 (not= (:connector/id connector) (:connector/connected-to target))
+                 [{:issue/type :mep/non-reciprocal-connection
+                   :issue/connector (:connector/id connector) :issue/target target-id}]
+                 (not= (:connector/domain connector) (:connector/domain target))
+                 [{:issue/type :mep/incompatible-domain
+                   :issue/connector (:connector/id connector) :issue/target target-id}]
+                 (not= (:connector/shape connector) (:connector/shape target))
+                 [{:issue/type :mep/incompatible-shape
+                   :issue/connector (:connector/id connector) :issue/target target-id}]
+                 (not= (:connector/size connector) (:connector/size target))
+                 [{:issue/type :mep/incompatible-size
+                   :issue/connector (:connector/id connector) :issue/target target-id}]
+                 (= (:connector/flow-direction connector) (:connector/flow-direction target))
+                 [{:issue/type :mep/incompatible-flow-direction
+                   :issue/connector (:connector/id connector) :issue/target target-id}]
+                 :else []))))
+         connectors)]
+    (vec (concat segment-issues connector-issues))))
 
 (defn federated-design
   [{:keys [architectural structural mep]}]

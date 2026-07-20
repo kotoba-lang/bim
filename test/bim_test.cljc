@@ -348,6 +348,54 @@
     (is (= :mep/dangling-connection
            (get-in federation [:federation/issues 0 :issue/type])))))
 
+(deftest solves-linear-structural-truss-analysis
+  (let [model (integration/structural-model
+               {:nodes [(integration/structural-node
+                         {:id :n1 :point [0.0 0.0] :restraints [true true]})
+                        (integration/structural-node
+                         {:id :n2 :point [2.0 0.0] :restraints [false true]})]
+                :members [(integration/structural-analysis-member
+                           {:id :m1 :start-node :n1 :end-node :n2 :area-m2 0.01
+                            :elastic-modulus-pa 2.0e11 :material "S355"})]
+                :load-cases [(integration/structural-load-case
+                              {:id :service :name "Service" :kind :service
+                               :nodal-loads [{:node :n2 :fx 1000.0 :fy 0.0}]})]})
+        result (integration/analyze-2d-truss model :service)]
+    (is (empty? (integration/validate-structural-model model)))
+    (is (< (#?(:clj Math/abs :cljs js/Math.abs)
+            (- 1.0e-6 (get-in result [:structural.analysis/displacements :n2 0]))) 1.0e-12))
+    (is (< (#?(:clj Math/abs :cljs js/Math.abs)
+            (- 1000.0 (get-in result [:structural.analysis/member-axial-forces :m1]))) 1.0e-6))))
+
+(deftest routes-and-validates-mep-systems
+  (let [route (integration/route-mep [0.0 0.0 0.0] [3.0 0.0 0.0]
+                                     [{:min [1.0 -0.5 -0.5] :max [2.0 0.5 0.5]}]
+                                     {:step 0.5 :clearance 0.0})
+        connector-a (integration/mep-connector
+                     {:id :a :point [1 0 0] :direction [1 0 0] :domain :piping
+                      :shape :round :size 0.1 :flow-direction :out :connected-to :b})
+        connector-b (integration/mep-connector
+                     {:id :b :point [1 0 0] :direction [-1 0 0] :domain :piping
+                      :shape :round :size 0.1 :flow-direction :in :connected-to :a})
+        segment-a (integration/mep-segment
+                   {:id 201 :kind :pipe :start [0 0 0] :end [1 0 0] :diameter 0.1
+                    :system-id :heating :connectors [connector-a]})
+        segment-b (integration/mep-segment
+                   {:id 202 :kind :pipe :start [1 0 0] :end [2 0 0] :diameter 0.1
+                    :system-id :heating :connectors [connector-b]})
+        system (integration/mep-system {:id :heating :name "Heating" :kind :hydronic
+                                        :medium :water :design-flow 0.005
+                                        :segments [segment-a segment-b]})
+        loss (integration/pressure-loss {:length-m 20.0 :diameter-m 0.1
+                                         :roughness-m 1.5e-6 :flow-m3-s 0.005
+                                         :density-kg-m3 998.0 :viscosity-pa-s 0.001})]
+    (is (> (count route) 2))
+    (is (some #(not= 0.0 (second %)) route))
+    (is (empty? (integration/validate-mep-system system)))
+    (is (= :swept-disk-solid (get-in segment-a [:geometry :kind])))
+    (is (pos? (:mep/pressure-loss-pa loss)))
+    (is (> (:mep/reynolds loss) 2300.0))))
+
 (deftest ifc-spf-and-svg-deliverables
   (let [opening (bim/rectangular-opening {:id 20 :offset 2.0 :width 0.9 :height 2.1
                                           :filled-by 30})
