@@ -316,3 +316,113 @@
       {:structural.frame/nodes node-results :structural.frame/members member-results
        :structural.frame/displacements displacements
        :structural.frame/reactions reactions})))
+
+(defn analyze-plane-stress-mesh
+  "Analyze a 2D mesh of constant-strain triangular membrane elements. Each
+  node has ux/uy DOFs; results include reactions and element εx, εy, γxy,
+  σx, σy, and τxy in global coordinates."
+  [{:keys [nodes elements loads]}]
+  (let [node-index (into {} (map-indexed (fn [index node] [(:id node) index]) nodes))
+        node-by-id (into {} (map (juxt :id identity) nodes))
+        element-ids (map :id elements)
+        dof-count (* 2 (count nodes))]
+    (when (or (empty? nodes) (empty? elements)
+              (not= (count nodes) (count node-index))
+              (not= (count elements) (count (distinct element-ids))))
+      (throw (ex-info "plane-stress mesh requires unique nodes and elements" {})))
+    (doseq [{:keys [id point restraints]} nodes]
+      (when-not (and id (= 2 (count point)) (every? number? point)
+                     (= 2 (count restraints)) (every? boolean? restraints))
+        (throw (ex-info "invalid plane-stress node"
+                        {:node id :point point :restraints restraints}))))
+    (let [element-data
+          (mapv
+           (fn [{:keys [id nodes thickness-m elastic-modulus-pa poisson-ratio] :as element}]
+             (let [[n1 n2 n3] (map node-by-id nodes)]
+               (when-not (and (= 3 (count nodes)) n1 n2 n3
+                              (pos? (or thickness-m 0.0))
+                              (pos? (or elastic-modulus-pa 0.0))
+                              (number? poisson-ratio)
+                              (< -1.0 poisson-ratio 0.5))
+                 (throw (ex-info "invalid plane-stress triangle" {:element id})))
+               (let [[[x1 y1] [x2 y2] [x3 y3]] (map :point [n1 n2 n3])
+                     signed-double-area (+ (* x1 (- y2 y3)) (* x2 (- y3 y1))
+                                           (* x3 (- y1 y2)))
+                     area (/ (math-abs signed-double-area) 2.0)]
+                 (when (< area 1.0e-12)
+                   (throw (ex-info "plane-stress triangle has zero area" {:element id})))
+                 (let [orientation (if (neg? signed-double-area) -1.0 1.0)
+                       denominator (* orientation signed-double-area)
+                       b (mapv #(* orientation %) [(- y2 y3) (- y3 y1) (- y1 y2)])
+                       c (mapv #(* orientation %) [(- x3 x2) (- x1 x3) (- x2 x1)])
+                       strain-matrix
+                       (mapv #(mapv (fn [value] (/ value denominator)) %)
+                             [[(b 0) 0.0 (b 1) 0.0 (b 2) 0.0]
+                              [0.0 (c 0) 0.0 (c 1) 0.0 (c 2)]
+                              [(c 0) (b 0) (c 1) (b 1) (c 2) (b 2)]])
+                       factor (/ elastic-modulus-pa (- 1.0 (* poisson-ratio poisson-ratio)))
+                       constitutive
+                       [[factor (* factor poisson-ratio) 0.0]
+                        [(* factor poisson-ratio) factor 0.0]
+                        [0.0 0.0 (* factor (/ (- 1.0 poisson-ratio) 2.0))]]
+                       stiffness (mapv #(mapv (fn [value] (* thickness-m area value)) %)
+                                       (matrix-multiply
+                                        (transpose strain-matrix)
+                                        (matrix-multiply constitutive strain-matrix)))
+                       dofs (vec (mapcat (fn [node-id]
+                                           (let [offset (* 2 (node-index node-id))]
+                                             [offset (inc offset)])) nodes))]
+                   {:element element :area area :dofs dofs
+                    :strain-matrix strain-matrix :constitutive constitutive
+                    :stiffness stiffness}))))
+           elements)
+          stiffness
+          (reduce (fn [matrix {:keys [stiffness dofs]}]
+                    (reduce (fn [result [i j]]
+                              (update-in result [(nth dofs i) (nth dofs j)] +
+                                         (get-in stiffness [i j])))
+                            matrix (for [i (range 6) j (range 6)] [i j])))
+                  (vec (repeat dof-count (vec (repeat dof-count 0.0)))) element-data)
+          load-vector
+          (reduce (fn [result {:keys [node fx fy] :as load}]
+                    (when-not (contains? node-index node)
+                      (throw (ex-info "plane-stress load references an unknown node"
+                                      {:load load})))
+                    (let [offset (* 2 (node-index node))]
+                      (-> result (update offset + (or fx 0.0))
+                          (update (inc offset) + (or fy 0.0)))))
+                  (vec (repeat dof-count 0.0)) loads)
+          fixed (into #{} (mapcat (fn [[index node]]
+                                    (keep-indexed #(when %2 (+ (* 2 index) %1))
+                                                  (:restraints node)))
+                                  (map-indexed vector nodes)))
+          free (vec (remove fixed (range dof-count)))
+          reduced (mapv (fn [row] (mapv #(get-in stiffness [row %]) free)) free)
+          solution (solve-system reduced (mapv #(nth load-vector %) free))
+          displacements (reduce (fn [result [dof value]] (assoc result dof value))
+                                (vec (repeat dof-count 0.0)) (map vector free solution))
+          reactions (mapv - (matrix-vector stiffness displacements) load-vector)
+          node-results
+          (into {} (map-indexed
+                    (fn [index node]
+                      [(:id node) {:ux (nth displacements (* 2 index))
+                                   :uy (nth displacements (inc (* 2 index)))
+                                   :rx (nth reactions (* 2 index))
+                                   :ry (nth reactions (inc (* 2 index)))}]) nodes))
+          element-results
+          (into {}
+                (map (fn [{:keys [element area dofs strain-matrix constitutive]}]
+                       (let [local-displacements (mapv #(nth displacements %) dofs)
+                             strain (matrix-vector strain-matrix local-displacements)
+                             stress (matrix-vector constitutive strain)]
+                         [(:id element)
+                          {:area-m2 area
+                           :strain {:epsilon-x (nth strain 0) :epsilon-y (nth strain 1)
+                                    :gamma-xy (nth strain 2)}
+                           :stress-pa {:sigma-x (nth stress 0) :sigma-y (nth stress 1)
+                                       :tau-xy (nth stress 2)}}]))
+                     element-data))]
+      {:structural.plane-stress/nodes node-results
+       :structural.plane-stress/elements element-results
+       :structural.plane-stress/displacements displacements
+       :structural.plane-stress/reactions reactions})))
