@@ -108,6 +108,24 @@
     (is (= 12 (count (:indices mesh))))
     (is (= [0.0 0.0 1.0] (first (:normals mesh))))))
 
+(deftest polygonal-face-inner-bound-projection
+  (let [element (bim/element
+                 {:id 64 :kind :other :name "Face with opening"
+                  :geometry {:kind :polygonal-face-set :closed false
+                             :coordinates [[0 0 0] [6 0 0] [6 6 0] [0 6 0]
+                                           [2 2 0] [2 4 0] [4 4 0] [4 2 0]]
+                             :faces [{:outer [1 2 3 4] :inners [[5 6 7 8]]}]}})
+        mesh (bim/element-mesh element)
+        area (reduce
+              + (map (fn [[ia ib ic]]
+                       (let [[[ax ay] [bx by] [cx cy]]
+                             (map (fn [i] (take 2 (nth (:positions mesh) i))) [ia ib ic])]
+                         (/ (#?(:clj Math/abs :cljs js/Math.abs)
+                             (- (* (- bx ax) (- cy ay)) (* (- by ay) (- cx ax)))) 2.0)))
+                     (partition 3 (:indices mesh))))]
+    (is (= 24 (count (:indices mesh))))
+    (is (= 32.0 area))))
+
 (deftest circular-and-swept-disk-mesh-projection
   (let [column (bim/element {:id 61 :kind :column :name "Round"
                              :geometry {:kind :extruded-area-solid
