@@ -577,6 +577,87 @@
         indices (vec (concat bottom-tris top-tris sides))]
     {:positions positions :indices indices :normals (vec (repeat (* 2 n) [0 0 1]))}))
 
+(defn- midpoint3 [a b]
+  (mapv #(/ (+ %1 %2) 2.0) a b))
+
+(defn- face-bound [points]
+  {:bounds [{:kind :outer :orientation true :points (mapv vec points)}]})
+
+(defn gable-roof
+  "Construct a closed, constant-thickness gable roof from a rectangular
+  footprint. The ridge follows the longer footprint edges and its rise derives
+  from `slope-rad`, making the BREP directly portable to IFC."
+  [{:keys [id name boundary slope-rad thickness material]
+    :or {name "Gable Roof" slope-rad (/ #?(:clj Math/PI :cljs js/Math.PI) 6.0)
+         thickness 0.2 material "Roof construction"}}]
+  (when-not (and (= 4 (count boundary)) (every? valid-point3? boundary))
+    (throw (ex-info "gable roof requires four finite footprint points"
+                    {:boundary boundary})))
+  (when-not (and (finite-number? slope-rad) (pos? slope-rad)
+                 (< slope-rad (/ #?(:clj Math/PI :cljs js/Math.PI) 2.0))
+                 (finite-number? thickness) (pos? thickness))
+    (throw (ex-info "gable roof slope and thickness must be positive"
+                    {:slope-rad slope-rad :thickness thickness})))
+  (let [[a b c d] (mapv vec boundary)
+        edge-length (fn [from to]
+                      (sqrt (reduce + (map (fn [x y]
+                                             (let [delta (- y x)] (* delta delta)))
+                                           from to))))
+        edge-ab (edge-length a b) edge-bc (edge-length b c)
+        edge-cd (edge-length c d) edge-da (edge-length d a)
+        ab (mapv - b a) bc (mapv - c b)
+        orthogonality (reduce + (map * ab bc))
+        same-elevation? (every? #(< (#?(:clj Math/abs :cljs js/Math.abs)
+                                      (- (nth % 2) (nth a 2))) 1.0e-8)
+                                [b c d])
+        rectangle? (and same-elevation? (> edge-ab 1.0e-9) (> edge-bc 1.0e-9)
+                        (< (#?(:clj Math/abs :cljs js/Math.abs) orthogonality) 1.0e-8)
+                        (< (#?(:clj Math/abs :cljs js/Math.abs) (- edge-ab edge-cd)) 1.0e-8)
+                        (< (#?(:clj Math/abs :cljs js/Math.abs) (- edge-bc edge-da)) 1.0e-8))
+        _ (when-not rectangle?
+            (throw (ex-info "gable roof footprint must be a planar rectangle"
+                            {:boundary boundary})))
+        [p0 p1 p2 p3 length span]
+        (if (>= edge-ab edge-bc)
+          [a b c d edge-ab edge-bc]
+          [b c d a edge-bc edge-ab])
+        rise (* 0.5 span (#?(:clj Math/tan :cljs js/Math.tan) slope-rad))
+        ridge-start (update (midpoint3 p0 p3) 2 + rise)
+        ridge-end (update (midpoint3 p1 p2) 2 + rise)
+        down [0.0 0.0 (- thickness)]
+        [q0 q1 q2 q3 qr0 qr1] (mapv #(mapv + % down)
+                                     [p0 p1 p2 p3 ridge-start ridge-end])
+        top-faces [[p0 p1 ridge-end ridge-start]
+                   [p3 ridge-start ridge-end p2]]
+        bottom-faces [[q0 qr0 qr1 q1] [q3 q2 qr1 qr0]]
+        edge-faces (mapv (fn [[top-a top-b bottom-a bottom-b]]
+                           [top-a bottom-a bottom-b top-b])
+                         [[p0 p1 q0 q1] [p1 p2 q1 q2]
+                          [p2 p3 q2 q3] [p3 p0 q3 q0]
+                          [p0 ridge-start q0 qr0] [ridge-start p3 qr0 q3]
+                          [p1 ridge-end q1 qr1] [ridge-end p2 qr1 q2]])
+        slope-length (sqrt (+ (* 0.5 span 0.5 span) (* rise rise)))
+        surface-area (* 2.0 length slope-length)
+        plan-area (* length span)]
+    (assoc
+     (element
+      {:id id :kind :roof :name name :global-id (str id) :placement :identity
+       :geometry {:kind :faceted-brep
+                  :faces (mapv face-bound (concat top-faces bottom-faces edge-faces))}
+       :material-layers [(material-layer material thickness false :other)]
+       :classification (classification-ref "Uniclass" "Ss_30_40" "Roof systems")
+       :quantities (quantities {:gross-area-m2 surface-area :net-area-m2 surface-area
+                                :projected-area-m2 plan-area
+                                :gross-volume-m3 (* surface-area thickness)
+                                :net-volume-m3 (* surface-area thickness)})
+       :psets {"Pset_RoofCommon"
+               (property-set "Pset_RoofCommon" {:IsExternal (bool-value true)
+                                                 :PitchAngle (real-value slope-rad)})}
+       :openings [] :connected-to []})
+     :roof/definition {:kind :gable :boundary (mapv vec boundary)
+                       :ridge [ridge-start ridge-end] :slope-rad slope-rad
+                       :thickness thickness})))
+
 (defn- point3 [point]
   (let [[x y & [z]] (or point [0.0 0.0 0.0])]
     [(or x 0.0) (or y 0.0) (or z 0.0)]))
