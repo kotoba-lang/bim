@@ -1310,18 +1310,21 @@
 
 (defn structural-analysis-member
   [{:keys [id start-node end-node area-m2 elastic-modulus-pa yield-strength-pa
-           resistance-factor section material]}]
+           resistance-factor section material density-kg-m3]}]
   {:structural.member/id id :structural.member/start-node start-node
    :structural.member/end-node end-node :structural.member/area-m2 area-m2
    :structural.member/elastic-modulus-pa elastic-modulus-pa
    :structural.member/yield-strength-pa yield-strength-pa
    :structural.member/resistance-factor (or resistance-factor 0.9)
-   :structural.member/section section :structural.member/material material})
+   :structural.member/section section :structural.member/material material
+   :structural.member/density-kg-m3 density-kg-m3})
 
-(defn structural-load-case [{:keys [id name kind nodal-loads]}]
+(defn structural-load-case [{:keys [id name kind nodal-loads member-loads gravity]}]
   {:structural.load-case/id id :structural.load-case/name name
    :structural.load-case/kind (or kind :service)
-   :structural.load-case/nodal-loads (vec nodal-loads)})
+   :structural.load-case/nodal-loads (vec nodal-loads)
+   :structural.load-case/member-loads (vec member-loads)
+   :structural.load-case/gravity gravity})
 
 (defn structural-load-combination [{:keys [id name factors kind]}]
   {:structural.combination/id id :structural.combination/name name
@@ -1334,9 +1337,26 @@
    :structural/combinations (vec combinations)})
 
 (defn validate-structural-model [model]
-  (let [nodes (into {} (map (juxt :structural.node/id identity) (:structural/nodes model)))]
+  (let [node-list (:structural/nodes model)
+        nodes (into {} (map (juxt :structural.node/id identity) node-list))
+        member-list (:structural/members model)
+        members (into {} (map (juxt :structural.member/id identity) member-list))
+        dimensions (set (map (comp count :structural.node/point) node-list))]
     (vec
-     (mapcat (fn [member]
+     (concat
+      (when (or (> (count dimensions) 1) (not (contains? #{2 3} (first dimensions))))
+        [{:issue/type :structural/inconsistent-node-dimensions :issue/dimensions dimensions}])
+      (when-not (= (count node-list) (count nodes))
+        [{:issue/type :structural/duplicate-node-id}])
+      (when-not (= (count member-list) (count members))
+        [{:issue/type :structural/duplicate-member-id}])
+      (mapcat (fn [node]
+                (when-not (= (count (:structural.node/point node))
+                             (count (:structural.node/restraints node)))
+                  [{:issue/type :structural/restraint-dimension-mismatch
+                    :issue/node (:structural.node/id node)}]))
+              node-list)
+      (mapcat (fn [member]
                (let [start (nodes (:structural.member/start-node member))
                      end (nodes (:structural.member/end-node member))]
                  (cond
@@ -1349,8 +1369,26 @@
                    (= (:structural.node/point start) (:structural.node/point end))
                    [{:issue/type :structural/zero-length-member
                      :issue/member (:structural.member/id member)}]
+                   (or (not (pos? (or (:structural.member/area-m2 member) 0.0)))
+                       (not (pos? (or (:structural.member/elastic-modulus-pa member) 0.0))))
+                   [{:issue/type :structural/invalid-member-properties
+                     :issue/member (:structural.member/id member)}]
                    :else [])))
-             (:structural/members model)))))
+              member-list)
+      (mapcat
+       (fn [load-case]
+         (concat
+          (for [load (:structural.load-case/nodal-loads load-case)
+                :when (not (contains? nodes (:node load)))]
+            {:issue/type :structural/load-missing-node
+             :issue/load-case (:structural.load-case/id load-case)
+             :issue/node (:node load)})
+          (for [load (:structural.load-case/member-loads load-case)
+                :when (not (contains? members (:member load)))]
+            {:issue/type :structural/load-missing-member
+             :issue/load-case (:structural.load-case/id load-case)
+             :issue/member (:member load)})))
+       (:structural/load-cases model))))))
 
 (defn- solve-linear-system [matrix values]
   (let [n (count values)]
@@ -1380,46 +1418,96 @@
                         [matrix values] (range (inc column) n))]
             (recur (inc column) matrix values)))))))
 
-(defn analyze-2d-truss
-  "Linear-elastic small-displacement 2D truss analysis. Loads are Newtons,
-  coordinates metres, E Pascals, and results contain metre displacements and
-  signed axial member forces in Newtons."
+(defn- structural-member-geometry [node-by-id member]
+  (let [a (:structural.node/point (node-by-id (:structural.member/start-node member)))
+        b (:structural.node/point (node-by-id (:structural.member/end-node member)))
+        delta (mapv - b a) length (sqrt (reduce + (map #(* % %) delta)))]
+    {:length length :direction (mapv #(/ % length) delta)}))
+
+(defn- truss-load-vector [model load-case node-index dimension]
+  (let [node-by-id (into {} (map (juxt :structural.node/id identity)
+                                  (:structural/nodes model)))
+        member-by-id (into {} (map (juxt :structural.member/id identity)
+                                    (:structural/members model)))
+        axes [:fx :fy :fz]
+        empty-loads (vec (repeat (* dimension (count node-index)) 0.0))
+        add-node-load
+        (fn [result node-id values]
+          (let [offset (* dimension (node-index node-id))]
+            (reduce (fn [loads axis]
+                      (update loads (+ offset axis) + (or (nth values axis nil) 0.0)))
+                    result (range dimension))))
+        nodal (reduce (fn [result load]
+                        (add-node-load result (:node load)
+                                       (mapv load (take dimension axes))))
+                      empty-loads (:structural.load-case/nodal-loads load-case))
+        distributed
+        (reduce (fn [result load]
+                  (let [member (member-by-id (:member load))
+                        {:keys [length]} (structural-member-geometry node-by-id member)
+                        values (mapv #(* 0.5 length (or (load %) 0.0))
+                                     (take dimension [:wx :wy :wz]))]
+                    (-> result
+                        (add-node-load (:structural.member/start-node member) values)
+                        (add-node-load (:structural.member/end-node member) values))))
+                nodal (:structural.load-case/member-loads load-case))
+        gravity (take dimension (or (:structural.load-case/gravity load-case)
+                                    (repeat 0.0)))]
+    (reduce (fn [result member]
+              (if-let [density (:structural.member/density-kg-m3 member)]
+                (let [{:keys [length]} (structural-member-geometry node-by-id member)
+                      mass (* density (:structural.member/area-m2 member) length)
+                      values (mapv #(* 0.5 mass %) gravity)]
+                  (-> result
+                      (add-node-load (:structural.member/start-node member) values)
+                      (add-node-load (:structural.member/end-node member) values)))
+                result))
+            distributed (:structural/members model))))
+
+(defn analyze-truss
+  "Dimension-independent linear elastic truss solver for 2D and 3D models.
+  Supports nodal loads, uniform global member loads, member self-weight,
+  support reactions, strain/stress, and axial force results."
   [model load-case-id]
   (when-let [issues (seq (validate-structural-model model))]
     (throw (ex-info "invalid structural model" {:issues issues})))
-  (let [nodes (:structural/nodes model) node-index (into {} (map-indexed #(vector (:structural.node/id %2) %1) nodes))
+  (let [nodes (:structural/nodes model)
+        dimension (count (:structural.node/point (first nodes)))
+        node-index (into {} (map-indexed #(vector (:structural.node/id %2) %1) nodes))
         node-by-id (into {} (map (juxt :structural.node/id identity) nodes))
-        dof-count (* 2 (count nodes))
-        empty-matrix (vec (repeat dof-count (vec (repeat dof-count 0.0))))
+        dof-count (* dimension (count nodes))
         stiffness
-        (reduce (fn [matrix member]
-                  (let [a (node-by-id (:structural.member/start-node member))
-                        b (node-by-id (:structural.member/end-node member))
-                        [ax ay] (:structural.node/point a) [bx by] (:structural.node/point b)
-                        dx (- bx ax) dy (- by ay) length (sqrt (+ (* dx dx) (* dy dy)))
-                        c (/ dx length) s (/ dy length)
-                        factor (/ (* (:structural.member/area-m2 member)
-                                     (:structural.member/elastic-modulus-pa member)) length)
-                        local (mapv #(mapv (fn [value] (* factor value)) %)
-                                    [[(* c c) (* c s) (- (* c c)) (- (* c s))]
-                                     [(* c s) (* s s) (- (* c s)) (- (* s s))]
-                                     [(- (* c c)) (- (* c s)) (* c c) (* c s)]
-                                     [(- (* c s)) (- (* s s)) (* c s) (* s s)]])
-                        ai (* 2 (node-index (:structural.node/id a)))
-                        bi (* 2 (node-index (:structural.node/id b))) dofs [ai (inc ai) bi (inc bi)]]
-                    (reduce (fn [result [i j]]
-                              (update-in result [(nth dofs i) (nth dofs j)] + (get-in local [i j])))
-                            matrix (for [i (range 4) j (range 4)] [i j]))))
-                empty-matrix (:structural/members model))
+        (reduce
+         (fn [matrix member]
+           (let [{:keys [length direction]} (structural-member-geometry node-by-id member)
+                 factor (/ (* (:structural.member/area-m2 member)
+                              (:structural.member/elastic-modulus-pa member)) length)
+                 start (* dimension (node-index (:structural.member/start-node member)))
+                 end (* dimension (node-index (:structural.member/end-node member)))
+                 dofs (vec (concat (range start (+ start dimension))
+                                   (range end (+ end dimension))))]
+             (reduce
+              (fn [result [block-i block-j axis-i axis-j]]
+                (let [sign (if (= block-i block-j) 1.0 -1.0)
+                      row (+ (* block-i dimension) axis-i)
+                      column (+ (* block-j dimension) axis-j)]
+                  (update-in result [(nth dofs row) (nth dofs column)] +
+                             (* sign factor (nth direction axis-i) (nth direction axis-j)))))
+              matrix
+              (for [block-i (range 2) block-j (range 2)
+                    axis-i (range dimension) axis-j (range dimension)]
+                [block-i block-j axis-i axis-j]))))
+         (vec (repeat dof-count (vec (repeat dof-count 0.0))))
+         (:structural/members model))
         load-case (first (filter #(= load-case-id (:structural.load-case/id %))
                                  (:structural/load-cases model)))
-        loads (reduce (fn [result {:keys [node fx fy]}]
-                        (let [index (* 2 (node-index node))]
-                          (-> result (update index + (or fx 0.0)) (update (inc index) + (or fy 0.0)))))
-                      (vec (repeat dof-count 0.0)) (:structural.load-case/nodal-loads load-case))
+        _ (when-not load-case
+            (throw (ex-info "structural load case not found" {:load-case-id load-case-id})))
+        loads (truss-load-vector model load-case node-index dimension)
         fixed (into #{} (mapcat (fn [[index node]]
                                   (keep-indexed (fn [axis restrained?]
-                                                  (when restrained? (+ (* 2 index) axis)))
+                                                  (when restrained?
+                                                    (+ (* dimension index) axis)))
                                                 (:structural.node/restraints node)))
                                 (map-indexed vector nodes)))
         free (vec (remove fixed (range dof-count)))
@@ -1427,30 +1515,56 @@
         reduced-loads (mapv #(nth loads %) free)
         reduced-displacements (solve-linear-system reduced-matrix reduced-loads)
         displacements (reduce (fn [result [dof value]] (assoc result dof value))
-                              (vec (repeat dof-count 0.0)) (map vector free reduced-displacements))
-        member-forces
-        (into {} (map (fn [member]
-                        (let [a (node-by-id (:structural.member/start-node member))
-                              b (node-by-id (:structural.member/end-node member))
-                              [ax ay] (:structural.node/point a) [bx by] (:structural.node/point b)
-                              dx (- bx ax) dy (- by ay) length (sqrt (+ (* dx dx) (* dy dy)))
-                              c (/ dx length) s (/ dy length)
-                              ai (* 2 (node-index (:structural.node/id a)))
-                              bi (* 2 (node-index (:structural.node/id b)))
-                              extension (+ (* c (- (nth displacements bi) (nth displacements ai)))
-                                           (* s (- (nth displacements (inc bi))
-                                                   (nth displacements (inc ai)))))
-                              force (* (/ (* (:structural.member/area-m2 member)
-                                               (:structural.member/elastic-modulus-pa member)) length)
-                                       extension)]
-                          [(:structural.member/id member) force]))
-                      (:structural/members model)))]
+                              (vec (repeat dof-count 0.0))
+                              (map vector free reduced-displacements))
+        reactions (mapv -
+                        (mapv #(reduce + (map * % displacements)) stiffness)
+                        loads)
+        member-results
+        (into {}
+              (map (fn [member]
+                     (let [{:keys [length direction]}
+                           (structural-member-geometry node-by-id member)
+                           start (* dimension (node-index (:structural.member/start-node member)))
+                           end (* dimension (node-index (:structural.member/end-node member)))
+                           extension (reduce +
+                                             (map-indexed
+                                              (fn [axis cosine]
+                                                (* cosine (- (nth displacements (+ end axis))
+                                                             (nth displacements (+ start axis)))))
+                                              direction))
+                           strain (/ extension length)
+                           stress (* (:structural.member/elastic-modulus-pa member) strain)
+                           force (* (:structural.member/area-m2 member) stress)]
+                       [(:structural.member/id member)
+                        {:length-m length :extension-m extension :strain strain
+                         :stress-pa stress :force-n force}]))
+                   (:structural/members model)))]
     {:structural.analysis/load-case load-case-id
+     :structural.analysis/dimension dimension
      :structural.analysis/displacements
      (into {} (map-indexed (fn [index node]
                              [(:structural.node/id node)
-                              [(nth displacements (* 2 index)) (nth displacements (inc (* 2 index)))]]) nodes))
-     :structural.analysis/member-axial-forces member-forces}))
+                              (subvec displacements (* dimension index)
+                                      (* dimension (inc index)))]) nodes))
+     :structural.analysis/reactions
+     (into {} (map-indexed (fn [index node]
+                             [(:structural.node/id node)
+                              (subvec reactions (* dimension index)
+                                      (* dimension (inc index)))]) nodes))
+     :structural.analysis/member-results member-results
+     :structural.analysis/member-axial-forces
+     (into {} (map (fn [[id result]] [id (:force-n result)]) member-results))}))
+
+(defn analyze-2d-truss [model load-case-id]
+  (when-not (= 2 (count (get-in model [:structural/nodes 0 :structural.node/point])))
+    (throw (ex-info "2D truss requires 2D nodes" {})))
+  (analyze-truss model load-case-id))
+
+(defn analyze-3d-truss [model load-case-id]
+  (when-not (= 3 (count (get-in model [:structural/nodes 0 :structural.node/point])))
+    (throw (ex-info "3D truss requires 3D nodes" {})))
+  (analyze-truss model load-case-id))
 
 (defn analyze-structural-combination
   "Analyze a factored load combination and check axial member resistance."
@@ -1469,20 +1583,45 @@
                            (throw (ex-info "structural load case not found"
                                            {:load-case-id case-id
                                             :combination-id combination-id})))
-                         (map (fn [{:keys [node fx fy]}]
+                         (map (fn [{:keys [node fx fy fz]}]
                                 {:node node :fx (* factor (or fx 0.0))
-                                 :fy (* factor (or fy 0.0))})
+                                 :fy (* factor (or fy 0.0))
+                                 :fz (* factor (or fz 0.0))})
                               (:structural.load-case/nodal-loads (case-by-id case-id)))))
                (group-by :node)
                (mapv (fn [[node loads]]
                        {:node node :fx (reduce + (map :fx loads))
-                        :fy (reduce + (map :fy loads))})))
+                        :fy (reduce + (map :fy loads))
+                        :fz (reduce + (map :fz loads))})))
+          combined-member-loads
+          (->> (:structural.combination/factors combination)
+               (mapcat (fn [[case-id factor]]
+                         (map (fn [{:keys [member wx wy wz]}]
+                                {:member member :wx (* factor (or wx 0.0))
+                                 :wy (* factor (or wy 0.0)) :wz (* factor (or wz 0.0))})
+                              (:structural.load-case/member-loads (case-by-id case-id)))))
+               (group-by :member)
+               (mapv (fn [[member loads]]
+                       {:member member :wx (reduce + (map :wx loads))
+                        :wy (reduce + (map :wy loads)) :wz (reduce + (map :wz loads))})))
+          dimension (count (get-in model [:structural/nodes 0 :structural.node/point]))
+          combined-gravity
+          (reduce (fn [result [case-id factor]]
+                    (mapv + result
+                          (mapv #(* factor %)
+                                (take dimension
+                                      (or (:structural.load-case/gravity (case-by-id case-id))
+                                          (repeat 0.0))))))
+                  (vec (repeat dimension 0.0))
+                  (:structural.combination/factors combination))
           synthetic-id [:combination combination-id]
-          analysis (analyze-2d-truss
+          analysis (analyze-truss
                     (update model :structural/load-cases conj
                             (structural-load-case {:id synthetic-id :name (:structural.combination/name combination)
                                                    :kind (:structural.combination/kind combination)
-                                                   :nodal-loads combined-loads}))
+                                                   :nodal-loads combined-loads
+                                                   :member-loads combined-member-loads
+                                                   :gravity combined-gravity}))
                     synthetic-id)
           member-by-id (into {} (map (juxt :structural.member/id identity)
                                      (:structural/members model)))

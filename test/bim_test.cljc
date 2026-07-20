@@ -688,6 +688,39 @@
     (is (true? (get-in combination [:structural.analysis/member-checks :m1 :passes?])))
     (is (< (get-in combination [:structural.analysis/member-checks :m1 :utilization]) 0.001))))
 
+(deftest solves-3d-truss-distributed-load-self-weight-and-reactions
+  (let [model (integration/structural-model
+               {:nodes [(integration/structural-node
+                         {:id :a :point [0.0 0.0 0.0] :restraints [true true true]})
+                        (integration/structural-node
+                         {:id :b :point [2.0 0.0 0.0] :restraints [false true true]})]
+                :members [(integration/structural-analysis-member
+                           {:id :bar :start-node :a :end-node :b :area-m2 0.01
+                            :elastic-modulus-pa 2.0e11 :yield-strength-pa 2.5e8
+                            :resistance-factor 0.9 :density-kg-m3 7850.0})]
+                :load-cases [(integration/structural-load-case
+                              {:id :dead :name "Dead" :kind :permanent
+                               :nodal-loads [{:node :b :fx 1000.0 :fy 0.0 :fz 0.0}]
+                               :member-loads [{:member :bar :wx 100.0 :wy 0.0 :wz 0.0}]
+                               :gravity [0.0 -9.80665 0.0]})]
+                :combinations [(integration/structural-load-combination
+                                {:id :uls-3d :name "ULS 3D" :factors {:dead 1.5}})]})
+        result (integration/analyze-3d-truss model :dead)
+        combination (integration/analyze-structural-combination model :uls-3d)]
+    (is (= 3 (:structural.analysis/dimension result)))
+    (is (< (#?(:clj Math/abs :cljs js/Math.abs)
+            (- 1.1e-6 (get-in result [:structural.analysis/displacements :b 0])))
+           1.0e-12))
+    (is (< (#?(:clj Math/abs :cljs js/Math.abs)
+            (- 1100.0 (get-in result [:structural.analysis/member-axial-forces :bar])))
+           1.0e-6))
+    (is (< (#?(:clj Math/abs :cljs js/Math.abs)
+            (+ 1200.0 (get-in result [:structural.analysis/reactions :a 0])))
+           1.0e-6))
+    (is (> (get-in result [:structural.analysis/reactions :a 1]) 700.0))
+    (is (= 1650.0 (get-in combination [:structural.analysis/member-checks :bar :force-n])))
+    (is (true? (get-in combination [:structural.analysis/member-checks :bar :passes?])))))
+
 (deftest routes-and-validates-mep-systems
   (let [route (integration/route-mep [0.0 0.0 0.0] [3.0 0.0 0.0]
                                      [{:min [1.0 -0.5 -0.5] :max [2.0 0.5 0.5]}
