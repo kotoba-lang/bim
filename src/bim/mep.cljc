@@ -5,6 +5,7 @@
 (def ^:private pi #?(:clj Math/PI :cljs js/Math.PI))
 (defn- sqrt [value] (#?(:clj Math/sqrt :cljs js/Math.sqrt) value))
 (defn- acos [value] (#?(:clj Math/acos :cljs js/Math.acos) value))
+(defn- math-abs [value] (#?(:clj Math/abs :cljs js/Math.abs) value))
 (defn- magnitude [vector] (sqrt (reduce + (map #(* % %) vector))))
 (defn- normalize [vector] (let [length (magnitude vector)] (mapv #(/ % length) vector)))
 (defn- subtract [a b] (mapv - a b))
@@ -61,6 +62,130 @@
      :mep.assembly/open-connectors
      [(get-in segments [0 :mep/connectors 0])
       (get-in segments [(dec segment-count) :mep/connectors 1])]}))
+
+(defn network-assembly
+  "Generate connected round segments plus elbow, reducer, tee, cross, or
+  manifold fittings from an arbitrary node/edge route graph. Edge order is
+  retained so connector ids remain stable across deterministic rebuilds."
+  [{:keys [id system-id domain nodes edges default-size bend-radius]}]
+  (let [edge-ids (map :id edges)]
+    (when-not (and id system-id domain (map? nodes) (seq edges))
+      (throw (ex-info "MEP network assembly requires identity, nodes, and edges"
+                      {:id id :system-id system-id :domain domain})))
+    (when-not (= (count edge-ids) (count (distinct edge-ids)))
+      (throw (ex-info "MEP network assembly contains duplicate edge ids"
+                      {:edge-ids edge-ids})))
+    (doseq [[node-id {:keys [point]}] nodes]
+      (when-not (and (= 3 (count point)) (every? number? point))
+        (throw (ex-info "MEP network node requires a numeric 3D point"
+                        {:node-id node-id :point point}))))
+    (let [edge-specs
+          (mapv (fn [{:keys [id from to size] :as edge}]
+                  (let [start (get-in nodes [from :point]) end (get-in nodes [to :point])
+                        size (or size (get-in nodes [from :size])
+                                 (get-in nodes [to :size]) default-size)]
+                    (when-not (and start end (number? size) (pos? size))
+                      (throw (ex-info "MEP edge requires existing nodes and a positive size"
+                                      {:edge edge :size size})))
+                    (when (zero? (magnitude (subtract end start)))
+                      (throw (ex-info "MEP edge endpoints must not coincide" {:edge edge})))
+                    (assoc edge :size size :start start :end end
+                           :start-connector (str id "-start")
+                           :end-connector (str id "-end"))))
+                edges)
+          incidents
+          (reduce (fn [result {:keys [id from to size start end
+                                      start-connector end-connector]}]
+                    (-> result
+                        (update from (fnil conj [])
+                                {:edge-id id :connector-id start-connector :size size
+                                 :direction (normalize (subtract end start))})
+                        (update to (fnil conj [])
+                                {:edge-id id :connector-id end-connector :size size
+                                 :direction (normalize (subtract start end))})))
+                  {} edge-specs)
+          fitting-kind
+          (fn [node-incidents]
+            (let [degree (count node-incidents)
+                  sizes (set (map :size node-incidents))]
+              (case degree
+                1 nil
+                2 (let [[left right] node-incidents
+                        collinear? (> (math-abs (dot (:direction left) (:direction right)))
+                                      0.999999)]
+                    (cond (> (count sizes) 1) :reducer
+                          (not collinear?) :elbow
+                          :else nil))
+                3 :tee
+                4 :cross
+                :manifold)))
+          fittings
+          (into {}
+                (keep (fn [[node-id node-incidents]]
+                        (when-let [kind (fitting-kind node-incidents)]
+                          (let [point (get-in nodes [node-id :point])
+                                fitting-id (str id "-fitting-" node-id)
+                                connectors
+                                (mapv (fn [index incident]
+                                        {:connector/id (str fitting-id "-" index)
+                                         :connector/point point :connector/domain domain
+                                         :connector/shape :round
+                                         :connector/size (:size incident)
+                                         :connector/flow-direction :bidirectional
+                                         :connector/connected-to (:connector-id incident)})
+                                      (range) node-incidents)]
+                            [node-id
+                             {:id fitting-id :kind :flow-fitting
+                              :mep/fitting-kind kind :mep/system-id system-id
+                              :mep/node-id node-id :mep/point point
+                              :mep/bend-radius (when (= :elbow kind)
+                                                 (or bend-radius
+                                                     (* 1.5 (:size (first node-incidents)))))
+                              :mep/connectors connectors}]))))
+                incidents)
+          fitting-connector-by-segment
+          (into {}
+                (mapcat (fn [[_ fitting]]
+                          (map (juxt :connector/connected-to :connector/id)
+                               (:mep/connectors fitting))))
+                fittings)
+          direct-connector-by-segment
+          (into {}
+                (mapcat (fn [[node-id node-incidents]]
+                          (when (and (= 2 (count node-incidents))
+                                     (nil? (get fittings node-id)))
+                            (let [[left right] node-incidents]
+                              [[(:connector-id left) (:connector-id right)]
+                               [(:connector-id right) (:connector-id left)]]))))
+                incidents)
+          connection-by-segment (merge direct-connector-by-segment
+                                       fitting-connector-by-segment)
+          segments
+          (mapv (fn [{:keys [id from to size start end start-connector end-connector]}]
+                  {:id id :kind :mep-segment :mep/system-id system-id
+                   :mep/domain domain :mep/shape :round :mep/size size
+                   :geometry {:kind :swept-disk-solid :directrix [start end]
+                              :radius (/ size 2.0)}
+                   :mep/connectors
+                   [{:connector/id start-connector :connector/point start
+                     :connector/domain domain :connector/shape :round
+                     :connector/size size :connector/flow-direction :bidirectional
+                     :connector/connected-to
+                     (get connection-by-segment start-connector)}
+                    {:connector/id end-connector :connector/point end
+                     :connector/domain domain :connector/shape :round
+                     :connector/size size :connector/flow-direction :bidirectional
+                     :connector/connected-to
+                     (get connection-by-segment end-connector)}]
+                   :mep/from-node from :mep/to-node to})
+                edge-specs)
+          open-connectors
+          (->> segments (mapcat :mep/connectors)
+               (filter #(nil? (:connector/connected-to %))) vec)]
+      {:mep.assembly/id id :mep.assembly/system-id system-id
+       :mep.assembly/segments segments
+       :mep.assembly/fittings (vec (sort-by (comp str :mep/node-id) (vals fittings)))
+       :mep.assembly/open-connectors open-connectors})))
 
 (defn electrical-circuit
   [{:keys [id name apparent-power-va voltage-v power-factor poles phase

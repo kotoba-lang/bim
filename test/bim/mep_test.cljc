@@ -15,6 +15,44 @@
                              :connector/connected-to])))
     (is (= 2 (count (:mep.assembly/open-connectors assembly))))))
 
+(deftest network-assembly-generates-elbows-tees-and-reducers
+  (let [assembly
+        (mep/network-assembly
+         {:id "supply" :system-id :supply-air :domain :hvac :default-size 0.1
+          :nodes {:source {:point [0 0 0]}
+                  :inline {:point [1 0 0]}
+                  :bend {:point [2 0 0]}
+                  :tee {:point [2 2 0]}
+                  :terminal-a {:point [4 2 0]}
+                  :transition {:point [2 4 0]}
+                  :terminal-b {:point [2 6 0]}}
+          :edges [{:id "e1" :from :source :to :inline}
+                  {:id "e1b" :from :inline :to :bend}
+                  {:id "e2" :from :bend :to :tee}
+                  {:id "e3" :from :tee :to :terminal-a}
+                  {:id "e4" :from :tee :to :transition :size 0.1}
+                  {:id "e5" :from :transition :to :terminal-b :size 0.15}]})
+        fittings (into {} (map (juxt :mep/node-id identity)
+                               (:mep.assembly/fittings assembly)))
+        connectors (mapcat :mep/connectors
+                           (concat (:mep.assembly/segments assembly)
+                                   (:mep.assembly/fittings assembly)))
+        by-id (into {} (map (juxt :connector/id identity) connectors))]
+    (is (= 6 (count (:mep.assembly/segments assembly))))
+    (is (nil? (get fittings :inline)))
+    (is (= :elbow (get-in fittings [:bend :mep/fitting-kind])))
+    (is (= :tee (get-in fittings [:tee :mep/fitting-kind])))
+    (is (= :reducer (get-in fittings [:transition :mep/fitting-kind])))
+    (is (= 3 (count (:mep.assembly/open-connectors assembly))))
+    (is (every? (fn [connector]
+                  (if-let [target-id (:connector/connected-to connector)]
+                    (= (:connector/id connector)
+                       (:connector/connected-to (get by-id target-id)))
+                    true))
+                connectors))
+    (is (= 0.075 (get-in (last (:mep.assembly/segments assembly))
+                          [:geometry :radius])))))
+
 (deftest electrical-panel-balances-and-checks-circuits
   (let [circuits [(mep/electrical-circuit
                    {:id :c1 :name "Lighting" :apparent-power-va 2300.0 :voltage-v 230.0
