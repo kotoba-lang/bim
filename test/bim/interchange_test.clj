@@ -72,6 +72,7 @@
            :sheet/print-setting {:print-setting/paper-size :a3
                                  :print-setting/orientation :landscape}}
           {:sheet/id "s2" :sheet/number "A-401" :sheet/name "Sections and Schedules"
+           :sheet/size :a1
            :sheet/views ["section-a" "door-schedule"]
            :sheet/title-block {:title-block/project "Library"}}]}
         bytes (interchange/drawing-set-pdf [storey] {:drawing-set drawing-set})
@@ -87,4 +88,6 @@
     (is (some #{"2. Door Schedule"} (second texts)))
     (is (some #{"1  D01 | 4"} (second texts)))
     (is (> (get-in (first pages) [:MediaBox 2])
-           (get-in (first pages) [:MediaBox 3])))))
+           (get-in (first pages) [:MediaBox 3])))
+    (is (< 2383 (get-in (second pages) [:MediaBox 2]) 2385)
+        "semantic sheet size is used when no print setting is assigned")))

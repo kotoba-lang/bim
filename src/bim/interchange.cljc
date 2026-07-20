@@ -164,8 +164,10 @@
      (throw (ex-info "drawing set requires at least one sheet" {})))
    (pdf/write-document
     (mapv (fn [sheet]
-            (let [print-setting (or (:sheet/print-setting sheet)
-                                    (:print-setting options))
+            (let [print-setting (merge {:print-setting/paper-size (or (:sheet/size sheet) :a4)
+                                        :print-setting/orientation :landscape}
+                                       (:print-setting options)
+                                       (:sheet/print-setting sheet))
                   [width height] (paper-bounds print-setting options)]
               {:width width :height height
                :content (semantic-sheet-content sheet drawing-set
