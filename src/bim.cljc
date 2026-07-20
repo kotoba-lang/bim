@@ -342,10 +342,33 @@
   (when-let [mesh (geometry-mesh source)]
     (update mesh :positions #(mapv (fn [point] (transform-point point transform mapping-origin)) %))))
 
+(defn- face-normal [[[ax ay az] [bx by bz] [cx cy cz]]]
+  (let [ux (- bx ax) uy (- by ay) uz (- bz az)
+        vx (- cx ax) vy (- cy ay) vz (- cz az)
+        [nx ny nz] [(- (* uy vz) (* uz vy))
+                    (- (* uz vx) (* ux vz))
+                    (- (* ux vy) (* uy vx))]
+        length (sqrt (+ (* nx nx) (* ny ny) (* nz nz)))]
+    (if (pos? length) [(/ nx length) (/ ny length) (/ nz length)] [0.0 0.0 0.0])))
+
+(defn- faceted-brep-mesh [geometry]
+  (let [face-meshes
+        (keep (fn [face]
+                (when-let [bound (first (filter #(= :outer (:kind %)) (:bounds face)))]
+                  (let [points (cond-> (vec (:points bound)) (false? (:orientation bound)) reverse)
+                        points (vec points) n (count points)]
+                    (when (>= n 3)
+                      {:positions points
+                       :indices (vec (mapcat (fn [i] [0 i (inc i)]) (range 1 (dec n))))
+                       :normals (vec (repeat n (face-normal (take 3 points))))}))))
+              (:faces geometry))]
+    (when (seq face-meshes) (merge-meshes face-meshes))))
+
 (defn- geometry-mesh [geometry]
   (case (:kind geometry)
     :extruded-area-solid (extruded-area-mesh geometry)
     :mapped-item (mapped-item-mesh geometry)
+    :faceted-brep (faceted-brep-mesh geometry)
     :collection (let [meshes (keep geometry-mesh (:items geometry))]
                   (when (seq meshes) (merge-meshes meshes)))
     :boolean-result (when (= :union (:operator geometry))

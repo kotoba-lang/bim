@@ -227,7 +227,18 @@
                                                       :second-operand {:kind :half-space-solid}}
                                                      {:kind :extruded-area-solid
                                                       :profile {:kind :rectangle :x-dim 1 :y-dim 1}
-                                                      :depth 0.5}]}}]
+                                                      :depth 0.5}]}}
+                                 {:id 150 :global-id "brep-guid" :name "Faceted Tetrahedron"
+                                  :kind :proxy :container-id 4
+                                  :geometry {:kind :faceted-brep
+                                             :faces [{:bounds [{:kind :outer :orientation true
+                                                               :points [[0 0 0] [0 2 0] [2 0 0]]}]}
+                                                     {:bounds [{:kind :outer :orientation true
+                                                               :points [[0 0 0] [2 0 0] [0 0 2]]}]}
+                                                     {:bounds [{:kind :outer :orientation true
+                                                               :points [[2 0 0] [0 2 0] [0 0 2]]}]}
+                                                     {:bounds [{:kind :outer :orientation true
+                                                               :points [[0 2 0] [0 0 0] [0 0 2]]}]}]}}]
                   :ifc/units {:lengthunit {:kind :si :type :lengthunit :name :metre :scale 1.0}}}
         project (integration/import-external-ifc document)
         storey (bim/find-storey project 4)
@@ -235,7 +246,9 @@
         mapped (first (filter #(= 130 (:id %)) (:elements storey)))
         mapped-mesh (bim/element-mesh mapped)
         clipped (first (filter #(= 140 (:id %)) (:elements storey)))
-        clipped-mesh (bim/element-mesh clipped)]
+        clipped-mesh (bim/element-mesh clipped)
+        brep (first (filter #(= 150 (:id %)) (:elements storey)))
+        brep-mesh (bim/element-mesh brep)]
     (is (= "Tower" (:name project)))
     (is (= "Ground" (:name storey)))
     (is (= "wall-guid" (:global-id wall)))
@@ -254,4 +267,8 @@
     (is (= [5.0 6.0 0.0] (first (:positions mapped-mesh))))
     (is (= [9.0 8.0 3.0] (nth (:positions mapped-mesh) 6)))
     (is (= :collection (get-in clipped [:geometry :kind])))
-    (is (= 8 (count (:positions clipped-mesh))))))
+    (is (= 8 (count (:positions clipped-mesh))))
+    (is (= :faceted-brep (get-in brep [:geometry :kind])))
+    (is (= 12 (count (:positions brep-mesh))))
+    (is (= 12 (count (:indices brep-mesh))))
+    (is (= [0.0 0.0 -1.0] (first (:normals brep-mesh))))))
