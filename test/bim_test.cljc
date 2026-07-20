@@ -1026,6 +1026,24 @@
            (get-in analysis [:mep.analysis/connector-graph "route-1-s0-end"])))
     (is (pos? (:mep.analysis/total-pressure-loss-pa analysis)))))
 
+(deftest validates-bidirectional-branched-network-connectors
+  (let [assembly (mep/network-assembly
+                  {:id "branch" :system-id :hydronic :domain :piping
+                   :default-size 0.1
+                   :nodes {:source {:point [0 0 0]}
+                           :tee {:point [2 0 0]}
+                           :a {:point [4 1 0]}
+                           :b {:point [4 -1 0]}}
+                   :edges [{:id "main" :from :source :to :tee}
+                           {:id "a" :from :tee :to :a}
+                           {:id "b" :from :tee :to :b}]})
+        system (integration/mep-system
+                {:id :hydronic :kind :hydronic :medium :water :design-flow 0.005
+                 :segments (:mep.assembly/segments assembly)
+                 :fittings (:mep.assembly/fittings assembly)})]
+    (is (= :tee (get-in assembly [:mep.assembly/fittings 0 :mep/fitting-kind])))
+    (is (empty? (integration/validate-mep-system system)))))
+
 (deftest owns-and-atomically-connects-mep-equipment-connectors
   (let [pump-connector (integration/mep-connector
                         {:id :pump-out :point [1 0 0] :direction [1 0 0]

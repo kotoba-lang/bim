@@ -2930,7 +2930,9 @@
                  (not= (:connector/size connector) (:connector/size target))
                  [{:issue/type :mep/incompatible-size
                    :issue/connector (:connector/id connector) :issue/target target-id}]
-                 (= (:connector/flow-direction connector) (:connector/flow-direction target))
+                 (and (= (:connector/flow-direction connector)
+                         (:connector/flow-direction target))
+                      (not= :bidirectional (:connector/flow-direction connector)))
                  [{:issue/type :mep/incompatible-flow-direction
                    :issue/connector (:connector/id connector) :issue/target target-id}]
                  :else []))))
