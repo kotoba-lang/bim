@@ -2319,6 +2319,137 @@
                                :load-cases load-cases :combinations combinations})
             :structural/source-element-count (+ (count line-elements) (count shells))))))
 
+(defn- vector-sub [a b] (mapv - a b))
+(defn- cross-3d [[ax ay az] [bx by bz]]
+  [(- (* ay bz) (* az by)) (- (* az bx) (* ax bz)) (- (* ax by) (* ay bx))])
+(defn- vector-length [v] (sqrt (reduce + (map #(* % %) v))))
+
+(defn- polygon-area-3d [points]
+  (if (< (count points) 3) 0.0
+      (let [origin (first points)]
+        (reduce + (map (fn [[a b]]
+                         (/ (vector-length
+                             (cross-3d (vector-sub a origin) (vector-sub b origin))) 2.0))
+                       (partition 2 1 (rest points)))))))
+
+(defn- points-in-shell-bounds [nodes shell tolerance]
+  (let [points (:structural.shell/nodes shell)
+        xs (map first points) ys (map second points) zs (map #(nth % 2) points)
+        min-x (- (reduce min xs) tolerance) max-x (+ (reduce max xs) tolerance)
+        min-y (- (reduce min ys) tolerance) max-y (+ (reduce max ys) tolerance)
+        min-z (- (reduce min zs) tolerance) max-z (+ (reduce max zs) tolerance)]
+    (filterv (fn [node]
+               (let [[x y z] (:structural.node/point node)]
+                 (and (<= min-x x max-x) (<= min-y y max-y) (<= min-z z max-z))))
+             nodes)))
+
+(defn structural-area-load-case
+  "Transfer shell pressures to coincident analytical nodes by tributary area."
+  [model {:keys [id name pressures-pa direction tolerance-m kind]
+          :or {id :area-load name "Area loads" direction [0 0 -1]
+               tolerance-m 1.0e-4 kind :live}}]
+  (when-not (and (= 3 (count direction)) (every? number? direction)
+                 (pos? (vector-length direction)))
+    (throw (ex-info "structural area load requires a non-zero 3D direction" {})))
+  (let [unit (mapv #(/ % (vector-length direction)) direction)
+        loads
+        (mapcat
+         (fn [shell]
+           (let [pressure (get pressures-pa (:structural.shell/id shell) 0.0)
+                 nodes (points-in-shell-bounds (:structural/nodes model) shell tolerance-m)]
+             (when (and (not (zero? pressure)) (empty? nodes))
+               (throw (ex-info "shell area load has no supporting analytical nodes"
+                               {:shell-id (:structural.shell/id shell)})))
+             (when-not (zero? pressure)
+               (let [force-per-node (/ (* pressure
+                                          (polygon-area-3d (:structural.shell/nodes shell)))
+                                       (count nodes))]
+                 (map (fn [node]
+                        {:node (:structural.node/id node)
+                         :fx (* force-per-node (nth unit 0))
+                         :fy (* force-per-node (nth unit 1))
+                         :fz (* force-per-node (nth unit 2))
+                         :source-shell (:structural.shell/id shell)})
+                      nodes)))))
+         (:structural/shells model))]
+    (structural-load-case {:id id :name name :kind kind :nodal-loads loads})))
+
+(defn structural-wind-load-case
+  "Convert pressure on vertical analytical shells into lateral top-node loads."
+  [model {:keys [id name pressure-pa direction tolerance-m]
+          :or {id :wind name "Wind" direction [1 0 0] tolerance-m 1.0e-4}}]
+  (when-not (and (number? pressure-pa) (<= 0 pressure-pa))
+    (throw (ex-info "wind pressure must be non-negative" {:pressure-pa pressure-pa})))
+  (let [magnitude (vector-length direction)
+        _ (when-not (pos? magnitude)
+            (throw (ex-info "wind direction must be non-zero" {:direction direction})))
+        unit (mapv #(/ % magnitude) direction)
+        nodes (:structural/nodes model)
+        loads
+        (mapcat
+         (fn [shell]
+           (let [points (:structural.shell/nodes shell)
+                 zs (map #(nth % 2) points)
+                 vertical? (> (- (reduce max zs) (reduce min zs)) tolerance-m)]
+             (when vertical?
+               (let [top-z (reduce max zs)
+                     candidates (filterv #(<= (math-abs (- (nth (:structural.node/point %) 2)
+                                                            top-z)) tolerance-m)
+                                         (points-in-shell-bounds nodes shell tolerance-m))
+                     force (/ (* pressure-pa (polygon-area-3d points))
+                              (max 1 (count candidates)))]
+                 (map (fn [node]
+                        {:node (:structural.node/id node)
+                         :fx (* force (nth unit 0)) :fy (* force (nth unit 1))
+                         :fz (* force (nth unit 2))
+                         :source-shell (:structural.shell/id shell)}) candidates)))))
+         (:structural/shells model))]
+    (structural-load-case {:id id :name name :kind :wind :nodal-loads loads})))
+
+(defn structural-seismic-load-case
+  "Generate equivalent-static seismic forces from member mass and node height."
+  [model {:keys [id name coefficient direction gravity-m-s2]
+          :or {id :seismic name "Equivalent static seismic" coefficient 0.2
+               direction [1 0 0] gravity-m-s2 9.80665}}]
+  (when-not (and (number? coefficient) (pos? coefficient))
+    (throw (ex-info "seismic coefficient must be positive" {:coefficient coefficient})))
+  (let [nodes-by-id (into {} (map (juxt :structural.node/id identity)
+                                  (:structural/nodes model)))
+        mass-by-node
+        (reduce (fn [result member]
+                  (let [a (nodes-by-id (:structural.member/start-node member))
+                        b (nodes-by-id (:structural.member/end-node member))
+                        length (vector-length (vector-sub (:structural.node/point b)
+                                                          (:structural.node/point a)))
+                        mass (* (:structural.member/area-m2 member)
+                                (or (:structural.member/density-kg-m3 member) 0.0) length)
+                        half (/ mass 2.0)]
+                    (-> result (update (:structural.node/id a) (fnil + 0.0) half)
+                        (update (:structural.node/id b) (fnil + 0.0) half))))
+                {} (:structural/members model))
+        minimum-z (reduce min (map #(nth (:structural.node/point %) 2)
+                                   (:structural/nodes model)))
+        weighted (keep (fn [node]
+                         (let [height (- (nth (:structural.node/point node) 2) minimum-z)
+                               mass (get mass-by-node (:structural.node/id node) 0.0)]
+                           (when (and (pos? height) (pos? mass))
+                             [node (* mass height)]))) (:structural/nodes model))
+        denominator (reduce + (map second weighted))
+        _ (when (zero? denominator)
+            (throw (ex-info "seismic model has no elevated member mass" {})))
+        total-weight (* gravity-m-s2 (reduce + (vals mass-by-node)))
+        base-shear (* coefficient total-weight)
+        magnitude (vector-length direction)
+        unit (mapv #(/ % magnitude) direction)
+        loads (mapv (fn [[node weight-height]]
+                      (let [force (* base-shear (/ weight-height denominator))]
+                        {:node (:structural.node/id node)
+                         :fx (* force (nth unit 0)) :fy (* force (nth unit 1))
+                         :fz (* force (nth unit 2))})) weighted)]
+    (assoc (structural-load-case {:id id :name name :kind :seismic :nodal-loads loads})
+           :structural.load-case/base-shear-n base-shear
+           :structural.load-case/seismic-weight-n total-weight)))
+
 (defn mep-system [{:keys [id name kind medium design-flow segments]}]
   {:mep/id id :mep/name name :mep/kind kind :mep/medium medium
    :mep/design-flow design-flow :mep/segments (vec segments)})
