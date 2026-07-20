@@ -665,8 +665,25 @@
                 :profile {:kind :rectangle :x-dim width :y-dim (:depth opening)}
                 :direction [0.0 0.0 1.0] :depth height}}))
 
+(defn- connector-flow->ifc [flow]
+  (case flow :in :sink :out :source :bidirectional :sourceandsink
+        :sourceandsink :sourceandsink :notdefined))
+
+(defn- connector-domain->port-type [domain]
+  (case domain :duct :duct :hvac :duct :pipe :pipe :piping :pipe
+        :electrical :cable :cable :cable :notdefined))
+
+(defn- exported-port [connector]
+  {:id (:connector/id connector) :global-id (str (:connector/id connector))
+   :name (or (:connector/name connector) (str (:connector/id connector)))
+   :placement {:location (:connector/point connector)
+               :axis (or (:connector/direction connector) [0.0 0.0 1.0])}
+   :flow-direction (connector-flow->ifc (:connector/flow-direction connector))
+   :predefined-type (connector-domain->port-type (:connector/domain connector))
+   :system-type (or (:connector/system-type connector) :notdefined)})
+
 (defn- exported-element [storey element]
-  {:id (:id element) :global-id (:global-id element)
+  {:id (:id element) :global-id (or (:global-id element) (str (:id element)))
    :kind (:kind element) :name (:name element) :container-id (:id storey)
    :placement (when (map? (:placement element)) (:placement element))
    :geometry (exported-geometry element)
@@ -675,8 +692,23 @@
    :material (exported-material element)
    :classifications (exported-classifications element)
    :type-object (:type-object element)
+   :ports (mapv exported-port (:mep/connectors element))
    :openings (if (= :wall (:kind element))
                (mapv #(exported-opening element %) (:openings element)) [])})
+
+(defn- exported-connections [elements]
+  (let [connectors (mapcat :mep/connectors elements)
+        known (set (map :connector/id connectors))]
+    (->> connectors
+         (keep (fn [connector]
+                 (let [source (:connector/id connector)
+                       target (:connector/connected-to connector)]
+                   (when (and target (contains? known target)
+                              (neg? (compare (str source) (str target))))
+                     {:id (str source "-" target) :global-id (str source "-" target)
+                      :relating-port-global-id (str source)
+                      :related-port-global-id (str target)}))))
+         vec)))
 
 (defn- decimal-degrees->compound [value]
   (when (number? value)
@@ -730,6 +762,12 @@
   the canonical boundary consumed by STEP/JSON adapters; it is not STEP text."
   [project]
   (let [source (:ifc/source-document project)
+        storey-elements (mapcat (fn [storey]
+                                  (map #(vector storey %) (:elements storey)))
+                                (all-storeys project))
+        elements (mapv (fn [[storey element]] (exported-element storey element))
+                       storey-elements)
+        model-elements (mapv second storey-elements)
         exchange (ifc/exchange-document
                   {:project (cond-> {:id (:id project) :global-id (str (:id project))
                                      :name (:name project)
@@ -737,10 +775,13 @@
                                                        (:georeference project))
                                      :children (exported-spatial-tree project)}
                               (nil? source) (assoc :model project))
-                   :elements (mapv (fn [[storey element]] (exported-element storey element))
-                                   (mapcat (fn [storey]
-                                             (map #(vector storey %) (:elements storey)))
-                                           (all-storeys project)))})]
+                   :elements elements})
+        exchange (assoc exchange
+                        :ifc/groups (vec (or (:ifc/groups project)
+                                             (:ifc/groups source)))
+                        :ifc/connections (let [connections (exported-connections model-elements)]
+                                           (if (seq connections) connections
+                                               (vec (:ifc/connections source)))))]
     (if source
       (merge exchange
              (select-keys source [:ifc/schema :ifc/source :ifc/raw-spf
@@ -850,7 +891,22 @@
          host)))
    wall (:openings source)))
 
-(defn- imported-element [source]
+(defn- ifc-flow->connector [flow]
+  (case flow :sink :in :source :out :sourceandsink :bidirectional :notdefined nil nil))
+
+(defn- port-type->connector-domain [port-type]
+  (case port-type :duct :hvac :pipe :piping (:cable :cablecarrier) :electrical :other))
+
+(defn- imported-connector [port connected-port]
+  {:connector/id (:global-id port)
+   :connector/point (get-in port [:placement :location] [0.0 0.0 0.0])
+   :connector/direction (get-in port [:placement :axis] [0.0 0.0 1.0])
+   :connector/domain (port-type->connector-domain (:predefined-type port))
+   :connector/flow-direction (ifc-flow->connector (:flow-direction port))
+   :connector/system-type (:system-type port)
+   :connector/connected-to connected-port})
+
+(defn- imported-element [source connected-port-by-id]
   (let [[x y z] (get-in source [:placement :location] [0.0 0.0 0.0])
         origin [x y z]
         basis (placement-basis (:placement source))
@@ -890,6 +946,9 @@
                   :ifc/quantity-sets (:quantity-sets source)
                   :ifc/material (:material source)
                   :ifc/classifications (:classifications source)
+                  :mep/connectors
+                  (mapv #(imported-connector % (get connected-port-by-id (:global-id %)))
+                        (:ports source))
                   :quantities (merge (:quantities result) quantities)
                   :material-layers (if (seq material-layers)
                                      material-layers (:material-layers result))
@@ -914,6 +973,12 @@
           buildings (spatial-descendants root :ifcbuilding)
           storeys (spatial-descendants root :ifcbuildingstorey)
           elements-by-storey (group-by :container-id (:ifc/elements document))
+          connected-port-by-id
+          (reduce (fn [result connection]
+                    (let [a (:relating-port-global-id connection)
+                          b (:related-port-global-id connection)]
+                      (assoc result a b b a)))
+                  {} (:ifc/connections document))
           storey-models (into {}
                               (map (fn [node]
                                      [(:id node)
@@ -935,7 +1000,7 @@
                                                         :placement (:placement space)))
                                                (filter (comp #{:ifcspace} :type)
                                                        (:children node)))
-                                         :elements (mapv imported-element
+                                         :elements (mapv #(imported-element % connected-port-by-id)
                                                          (get elements-by-storey (:id node)))})
                                        :global-id (:global-id node))]))
                               storeys)
@@ -959,6 +1024,7 @@
        :world-origin (or (:world-origin georeference) [0.0 0.0 0.0])
        :true-north-rad true-north-rad :ifc/georeference georeference
        :ifc/schema (:ifc/schema document) :ifc/source-document document
+       :ifc/groups (:ifc/groups document) :ifc/connections (:ifc/connections document)
        :psets {}
        :sites [(assoc
                 (bim/site {:id (or (:id site-node) 1) :name (or (:name site-node) "Site")
