@@ -524,6 +524,68 @@
                 (vec (mapcat (fn [[a b c]] [a c b]) (partition 3 raw-indices)))
                 raw-indices)}))
 
+(defn- unwrap-parameter-ring [ring periodic-dimensions]
+  (reduce (fn [result point]
+            (if-let [previous (peek result)]
+              (conj result
+                    (mapv (fn [dimension value]
+                            (if (contains? periodic-dimensions dimension)
+                              (let [delta (- value (nth previous dimension))]
+                                (cond (> delta pi) (- value (* 2.0 pi))
+                                      (< delta (- pi)) (+ value (* 2.0 pi))
+                                      :else value))
+                              value))
+                          (range (count point)) point))
+              [point])) [] ring))
+
+(defn- trimmed-parametric-mesh
+  ([face point->uv sample] (trimmed-parametric-mesh face point->uv sample #{}))
+  ([face point->uv sample periodic-dimensions]
+   (when (seq (:bounds face))
+    (let [midpoint (fn [a b] (mapv #(/ % 2.0) (mapv + a b)))
+          subdivide (fn [triangles]
+                      (vec (mapcat (fn [[a b c]]
+                                     (let [ab (midpoint a b) bc (midpoint b c) ca (midpoint c a)]
+                                       [[a ab ca] [ab b bc] [ca bc c] [ab bc ca]]))
+                                   triangles)))
+          ordered (sort-by #(if (= :outer (:kind %)) 0 1) (:bounds face))
+          raw-rings (mapv (fn [bound]
+                            (let [uvs (-> (mapv #(point->uv (point3 %)) (:points bound))
+                                          (unwrap-parameter-ring periodic-dimensions))]
+                              (vec (cond-> uvs (false? (:orientation bound)) reverse))))
+                          ordered)
+          outer-center (when-let [outer (first raw-rings)]
+                         (mapv #(/ % (count outer)) (apply mapv + outer)))
+          rings (mapv (fn [ring]
+                        (let [center (mapv #(/ % (count ring)) (apply mapv + ring))
+                              shifts (mapv (fn [dimension outer-value value]
+                                             (if (contains? periodic-dimensions dimension)
+                                               (* 2.0 pi
+                                                  (#?(:clj Math/round :cljs js/Math.round)
+                                                   (/ (- outer-value value) (* 2.0 pi))))
+                                               0.0))
+                                           (range (count center)) outer-center center)]
+                          (mapv #(mapv + % shifts) ring)))
+                      raw-rings)
+          triangulated (polygon/triangulate-rings rings identity)
+          triangles (mapv (fn [[a b c]]
+                            [(nth (:vertices triangulated) a)
+                             (nth (:vertices triangulated) b)
+                             (nth (:vertices triangulated) c)])
+                          (partition 3 (:indices triangulated)))
+          refined (nth (iterate subdivide triangles) 2)
+          parameters (vec (mapcat identity refined))
+          vertices (mapv #(apply sample %) parameters)
+          reversed? (false? (:same-sense face))]
+      (when (seq vertices)
+        {:positions (mapv :position vertices)
+         :normals (mapv (fn [{:keys [normal]}]
+                          (if reversed? (mapv - normal) normal)) vertices)
+         :indices (if reversed?
+                    (vec (mapcat (fn [[a b c]] [a c b])
+                                 (partition 3 (range (count vertices)))))
+                    (vec (range (count vertices))))})))))
+
 (defn- spherical-face-mesh [face]
   (let [surface (:surface face) frame (surface-frame surface)
         radius (:radius surface)
@@ -535,6 +597,11 @@
         u-range (or (:u-range surface) (angular-range us [0.0 (* 2.0 pi)]))
         v-range (or (:v-range surface) (angular-range vs [(/ (- pi) 2.0) (/ pi 2.0)]))
         u-periodic? (and (empty? local-points) (nil? (:u-range surface)))
+        point->uv (fn [point]
+                    (let [[x y z] (point->local frame point)]
+                      [(#?(:clj Math/atan2 :cljs js/Math.atan2) y x)
+                       (#?(:clj Math/asin :cljs js/Math.asin)
+                        (max -1.0 (min 1.0 (/ z radius))))]))
         sample (fn [u v]
                  (let [cv (#?(:clj Math/cos :cljs js/Math.cos) v)
                        normal [(* cv (#?(:clj Math/cos :cljs js/Math.cos) u))
@@ -542,7 +609,8 @@
                                (#?(:clj Math/sin :cljs js/Math.sin) v)]]
                    {:position (local->world frame (mapv #(* radius %) normal))
                     :normal (local-vector->world frame normal)}))]
-    (parametric-surface-mesh face u-range v-range 24 12 u-periodic? false sample)))
+    (or (trimmed-parametric-mesh face point->uv sample #{0})
+        (parametric-surface-mesh face u-range v-range 24 12 u-periodic? false sample))))
 
 (defn- toroidal-face-mesh [face]
   (let [surface (:surface face) frame (surface-frame surface)
@@ -556,6 +624,11 @@
         v-range (or (:v-range surface) (angular-range vs [0.0 (* 2.0 pi)]))
         u-periodic? (and (empty? local-points) (nil? (:u-range surface)))
         v-periodic? (and (empty? local-points) (nil? (:v-range surface)))
+        point->uv (fn [point]
+                    (let [[x y z] (point->local frame point)]
+                      [(#?(:clj Math/atan2 :cljs js/Math.atan2) y x)
+                       (#?(:clj Math/atan2 :cljs js/Math.atan2)
+                        z (- (sqrt (+ (* x x) (* y y))) major-radius))]))
         sample (fn [u v]
                  (let [cu (#?(:clj Math/cos :cljs js/Math.cos) u)
                        su (#?(:clj Math/sin :cljs js/Math.sin) u)
@@ -565,7 +638,8 @@
                        normal [(* cv cu) (* cv su) sv]]
                    {:position (local->world frame [(* radial cu) (* radial su) (* minor-radius sv)])
                     :normal (local-vector->world frame normal)}))]
-    (parametric-surface-mesh face u-range v-range 24 12 u-periodic? v-periodic? sample)))
+    (or (trimmed-parametric-mesh face point->uv sample #{0 1})
+        (parametric-surface-mesh face u-range v-range 24 12 u-periodic? v-periodic? sample))))
 
 (defn- b-spline-face-mesh [face]
   (let [surface (:surface face)
@@ -590,39 +664,11 @@
                    (v3-normalize (v3-cross du dv))))
         sample (fn [u v]
                  {:position (point u v) :normal (normal u v)})
-        midpoint (fn [a b] (mapv #(/ % 2.0) (mapv + a b)))
-        subdivide (fn [triangles]
-                    (vec (mapcat (fn [[a b c]]
-                                   (let [ab (midpoint a b) bc (midpoint b c) ca (midpoint c a)]
-                                     [[a ab ca] [ab b bc] [ca bc c] [ab bc ca]]))
-                                 triangles)))
         trimmed-mesh
-        (when (seq (:bounds face))
-          (let [ordered (sort-by #(if (= :outer (:kind %)) 0 1) (:bounds face))
-                rings (mapv (fn [bound]
-                              (let [uvs (mapv #(-> (spline/closest-surface-parameters
-                                                    spline-surface (point3 %))
-                                                   :parameters)
-                                              (:points bound))]
-                                (cond-> uvs (false? (:orientation bound)) reverse)))
-                            ordered)
-                triangulated (polygon/triangulate-rings rings identity)
-                triangles (mapv (fn [[a b c]]
-                                  [(nth (:vertices triangulated) a)
-                                   (nth (:vertices triangulated) b)
-                                   (nth (:vertices triangulated) c)])
-                                (partition 3 (:indices triangulated)))
-                refined (nth (iterate subdivide triangles) 2)
-                uvs (vec (mapcat identity refined))
-                vertices (mapv #(apply sample %) uvs)
-                reversed? (false? (:same-sense face))]
-            {:positions (mapv :position vertices)
-             :normals (mapv (fn [{:keys [normal]}]
-                              (if reversed? (mapv - normal) normal)) vertices)
-             :indices (if reversed?
-                        (vec (mapcat (fn [[a b c]] [a c b])
-                                     (partition 3 (range (count vertices)))))
-                        (vec (range (count vertices))))}))]
+        (trimmed-parametric-mesh
+         face
+         #(-> (spline/closest-surface-parameters spline-surface %) :parameters)
+         sample)]
     (when (and (pos? u-count) (pos? v-count))
       (or trimmed-mesh
           (parametric-surface-mesh face u-range v-range 16 16
@@ -634,6 +680,7 @@
         z-axis (v3-normalize (point3 (or (:axis position) [0 0 1])))
         x-axis (v3-normalize (point3 (or (:ref-direction position) [1 0 0])))
         y-axis (v3-normalize (v3-cross z-axis x-axis))
+        radius (:radius surface)
         points (vec (mapcat :points (:bounds face)))
         local (mapv (fn [point]
                       (let [delta (v3-sub (point3 point) origin)]
@@ -643,8 +690,21 @@
         full-circle? (some (fn [edge]
                              (and (= :circle (get-in edge [:curve :kind]))
                                   (= (:start edge) (:end edge))))
-                           (mapcat :edges (:bounds face)))]
-    (when (seq zs)
+                           (mapcat :edges (:bounds face)))
+        point->uv (fn [point]
+                    (let [[x y z] (point->local {:origin origin :x x-axis :y y-axis :z z-axis}
+                                                point)]
+                      [(#?(:clj Math/atan2 :cljs js/Math.atan2) y x) z]))
+        trim-sample (fn [u v]
+                      (let [radial (mapv +
+                                         (mapv #(* (#?(:clj Math/cos :cljs js/Math.cos) u) %) x-axis)
+                                         (mapv #(* (#?(:clj Math/sin :cljs js/Math.sin) u) %) y-axis))]
+                        {:position (mapv + origin (mapv #(* radius %) radial)
+                                         (mapv #(* v %) z-axis))
+                         :normal radial}))]
+    (or (when-not full-circle?
+          (trimmed-parametric-mesh face point->uv trim-sample #{0}))
+        (when (seq zs)
       (let [z0 (reduce min zs) z1 (reduce max zs)
             angles (map (fn [[x y _]] (#?(:clj Math/atan2 :cljs js/Math.atan2) y x)) local)
             start (if full-circle? 0.0 (reduce min angles))
@@ -654,7 +714,6 @@
                                        (/ (- end start)
                                           (/ #?(:clj Math/PI :cljs js/Math.PI) 12.0))))))
             ring-count (if full-circle? segments (inc segments))
-            radius (:radius surface)
             sample (fn [z i]
                      (let [theta (+ start (* (- end start) (/ i segments)))
                            radial (mapv +
@@ -676,7 +735,7 @@
                       (vec (mapcat (fn [[a b c]] [a c b]) (partition 3 raw-indices)))
                       raw-indices)]
         {:positions (mapv :position vertices) :normals (mapv :normal vertices)
-         :indices indices}))))
+         :indices indices})))))
 
 (defn- clipped-extrusion [extrusion half-space]
   (let [z-axis (v3-normalize (point3 (or (get-in extrusion [:position :axis]) [0 0 1])))
