@@ -421,7 +421,7 @@
               (:faces geometry))]
     (when (seq face-meshes) (merge-meshes face-meshes))))
 
-(declare cylindrical-face-mesh)
+(declare cylindrical-face-mesh spherical-face-mesh toroidal-face-mesh)
 (defn- advanced-brep-mesh [geometry]
   (let [face-meshes
         (keep (fn [face]
@@ -435,6 +435,8 @@
                                     ordered)]
                     (planar-rings-mesh rings))
                   :cylinder (cylindrical-face-mesh face)
+                  :sphere (spherical-face-mesh face)
+                  :torus (toroidal-face-mesh face)
                   nil))
               (:faces geometry))]
     (when (seq face-meshes) (merge-meshes face-meshes))))
@@ -466,6 +468,102 @@
   (let [length (sqrt (reduce + (map #(* % %) v)))]
     (if (pos? length) (mapv #(/ % length) v) [0.0 0.0 0.0])))
 (defn- v3-dot [a b] (reduce + (map * a b)))
+
+(def ^:private pi #?(:clj Math/PI :cljs js/Math.PI))
+
+(defn- surface-frame [surface]
+  (let [position (:position surface)
+        z-axis (v3-normalize (point3 (or (:axis position) [0 0 1])))
+        initial-x (v3-normalize (point3 (or (:ref-direction position) [1 0 0])))
+        y-axis (v3-normalize (v3-cross z-axis initial-x))
+        x-axis (v3-normalize (v3-cross y-axis z-axis))]
+    {:origin (point3 (:location position)) :x x-axis :y y-axis :z z-axis}))
+
+(defn- local->world [{:keys [origin x y z]} [lx ly lz]]
+  (mapv + origin (mapv #(* lx %) x) (mapv #(* ly %) y) (mapv #(* lz %) z)))
+
+(defn- local-vector->world [{:keys [x y z]} [lx ly lz]]
+  (v3-normalize (mapv + (mapv #(* lx %) x) (mapv #(* ly %) y) (mapv #(* lz %) z))))
+
+(defn- point->local [{:keys [origin x y z]} point]
+  (let [delta (v3-sub (point3 point) origin)]
+    [(v3-dot delta x) (v3-dot delta y) (v3-dot delta z)]))
+
+(defn- angular-range [values default-range]
+  (if (seq values) [(reduce min values) (reduce max values)] default-range))
+
+(defn- parametric-surface-mesh
+  [face u-range v-range u-segments v-segments u-periodic? v-periodic? sample]
+  (let [[u0 u1] u-range [v0 v1] v-range
+        u-count (if u-periodic? u-segments (inc u-segments))
+        v-count (if v-periodic? v-segments (inc v-segments))
+        vertices (vec (for [vi (range v-count) ui (range u-count)]
+                        (sample (+ u0 (* (- u1 u0) (/ ui u-segments)))
+                                (+ v0 (* (- v1 v0) (/ vi v-segments))))))
+        u-side-count (if u-periodic? u-count (dec u-count))
+        v-side-count (if v-periodic? v-count (dec v-count))
+        raw-indices
+        (vec (mapcat (fn [vi]
+                       (mapcat (fn [ui]
+                                 (let [next-u (if u-periodic? (mod (inc ui) u-count) (inc ui))
+                                       next-v (if v-periodic? (mod (inc vi) v-count) (inc vi))
+                                       a (+ (* vi u-count) ui)
+                                       b (+ (* vi u-count) next-u)
+                                       c (+ (* next-v u-count) ui)
+                                       d (+ (* next-v u-count) next-u)]
+                                   [a b c b d c]))
+                               (range u-side-count)))
+                     (range v-side-count)))
+        reversed? (false? (:same-sense face))]
+    {:positions (mapv :position vertices)
+     :normals (mapv (fn [{:keys [normal]}]
+                      (if reversed? (mapv - normal) normal)) vertices)
+     :indices (if reversed?
+                (vec (mapcat (fn [[a b c]] [a c b]) (partition 3 raw-indices)))
+                raw-indices)}))
+
+(defn- spherical-face-mesh [face]
+  (let [surface (:surface face) frame (surface-frame surface)
+        radius (:radius surface)
+        local-points (map #(point->local frame %) (mapcat :points (:bounds face)))
+        us (map (fn [[x y _]] (#?(:clj Math/atan2 :cljs js/Math.atan2) y x)) local-points)
+        vs (map (fn [[_ _ z]]
+                  (#?(:clj Math/asin :cljs js/Math.asin)
+                   (max -1.0 (min 1.0 (/ z radius))))) local-points)
+        u-range (or (:u-range surface) (angular-range us [0.0 (* 2.0 pi)]))
+        v-range (or (:v-range surface) (angular-range vs [(/ (- pi) 2.0) (/ pi 2.0)]))
+        u-periodic? (and (empty? local-points) (nil? (:u-range surface)))
+        sample (fn [u v]
+                 (let [cv (#?(:clj Math/cos :cljs js/Math.cos) v)
+                       normal [(* cv (#?(:clj Math/cos :cljs js/Math.cos) u))
+                               (* cv (#?(:clj Math/sin :cljs js/Math.sin) u))
+                               (#?(:clj Math/sin :cljs js/Math.sin) v)]]
+                   {:position (local->world frame (mapv #(* radius %) normal))
+                    :normal (local-vector->world frame normal)}))]
+    (parametric-surface-mesh face u-range v-range 24 12 u-periodic? false sample)))
+
+(defn- toroidal-face-mesh [face]
+  (let [surface (:surface face) frame (surface-frame surface)
+        major-radius (:major-radius surface) minor-radius (:minor-radius surface)
+        local-points (map #(point->local frame %) (mapcat :points (:bounds face)))
+        us (map (fn [[x y _]] (#?(:clj Math/atan2 :cljs js/Math.atan2) y x)) local-points)
+        vs (map (fn [[x y z]]
+                  (#?(:clj Math/atan2 :cljs js/Math.atan2)
+                   z (- (sqrt (+ (* x x) (* y y))) major-radius))) local-points)
+        u-range (or (:u-range surface) (angular-range us [0.0 (* 2.0 pi)]))
+        v-range (or (:v-range surface) (angular-range vs [0.0 (* 2.0 pi)]))
+        u-periodic? (and (empty? local-points) (nil? (:u-range surface)))
+        v-periodic? (and (empty? local-points) (nil? (:v-range surface)))
+        sample (fn [u v]
+                 (let [cu (#?(:clj Math/cos :cljs js/Math.cos) u)
+                       su (#?(:clj Math/sin :cljs js/Math.sin) u)
+                       cv (#?(:clj Math/cos :cljs js/Math.cos) v)
+                       sv (#?(:clj Math/sin :cljs js/Math.sin) v)
+                       radial (+ major-radius (* minor-radius cv))
+                       normal [(* cv cu) (* cv su) sv]]
+                   {:position (local->world frame [(* radial cu) (* radial su) (* minor-radius sv)])
+                    :normal (local-vector->world frame normal)}))]
+    (parametric-surface-mesh face u-range v-range 24 12 u-periodic? v-periodic? sample)))
 
 (defn- cylindrical-face-mesh [face]
   (let [surface (:surface face) position (:position surface)

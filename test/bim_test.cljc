@@ -437,3 +437,36 @@
     (is (= 12 (count (:positions brep-mesh))))
     (is (= 12 (count (:indices brep-mesh))))
     (is (= [0.0 0.0 -1.0] (first (:normals brep-mesh))))))
+
+(deftest meshes-spherical-and-toroidal-advanced-faces
+  (let [sphere (bim/element-mesh
+                {:geometry {:kind :advanced-brep
+                            :faces [{:same-sense true :bounds []
+                                     :surface {:kind :sphere :radius 2.0
+                                               :position {:location [10 20 30]}}}]}})
+        torus (bim/element-mesh
+               {:geometry {:kind :advanced-brep
+                           :faces [{:same-sense false :bounds []
+                                    :surface {:kind :torus :major-radius 4.0 :minor-radius 1.0
+                                              :position {:location [1 2 3]}}}]}})
+        patch (bim/element-mesh
+               {:geometry {:kind :advanced-brep
+                           :faces [{:same-sense true
+                                    :bounds [{:kind :outer
+                                              :points [[2 0 0] [0 2 0] [0 0 2]]}]
+                                    :surface {:kind :sphere :radius 2.0
+                                              :position {:location [0 0 0]}}}]}})]
+    (is (= 312 (count (:positions sphere))))
+    (is (= 1728 (count (:indices sphere))))
+    (is (every? #(< (#?(:clj Math/abs :cljs js/Math.abs)
+                       (- 1.0 (#?(:clj Math/sqrt :cljs js/Math.sqrt)
+                               (reduce + (map (fn [x] (* x x)) %)))))
+                    1.0e-9)
+                (:normals sphere)))
+    (is (= [10.0 20.0 28.0] (first (:positions sphere))))
+    (is (= 288 (count (:positions torus))))
+    (is (= 1728 (count (:indices torus))))
+    (is (= [6.0 2.0 3.0] (first (:positions torus))))
+    (is (= [-1.0 -0.0 -0.0] (first (:normals torus))))
+    (is (= 325 (count (:positions patch))))
+    (is (= 1728 (count (:indices patch))))))
