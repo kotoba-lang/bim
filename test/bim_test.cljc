@@ -1599,6 +1599,27 @@
     (is (thrown? #?(:clj Exception :cljs js/Error)
                  (integration/add-view-annotation view leader)))))
 
+(deftest associative-dimensions-and-tags-follow-model-geometry
+  (let [wall (bim/wall {:id 260 :start [1 2 0] :end [7 2 0] :height 3})
+        dimension (integration/drawing-annotation
+                   {:id :wall-length :kind :dimension :from [0 0] :to [1 0]
+                    :references [{:element-id 260 :anchor :start}
+                                 {:element-id 260 :anchor :end}]})
+        tag (integration/drawing-annotation
+             {:id :wall-tag :kind :tag :point [0 0] :text "W260"
+              :references [{:element-id 260 :anchor :midpoint}]})
+        view (assoc (integration/drawing-view {:id :plan :kind :floor-plan})
+                    :view/annotations [dimension tag])
+        associated (integration/reassociate-view-annotations view [wall])
+        orphaned (integration/reassociate-drawing-annotation dimension [])]
+    (is (= [1 2] (get-in associated [:view/annotations 0 :from])))
+    (is (= [7 2] (get-in associated [:view/annotations 0 :to])))
+    (is (= 6.0 (get-in associated [:view/annotations 0 :value])))
+    (is (= [4.0 2.0] (get-in associated [:view/annotations 1 :point])))
+    (is (= :associated
+           (get-in associated [:view/annotations 1 :annotation/association-status])))
+    (is (= :orphaned (:annotation/association-status orphaned)))))
+
 (deftest detail-callouts-link-cropped-model-views
   (let [wall (bim/wall {:id 301 :start [0 0 0] :end [6 0 0] :height 3.0})
         storey (bim/storey {:id 40 :name "Callout Plan" :elevation 0 :height 3
