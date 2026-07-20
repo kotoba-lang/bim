@@ -25,19 +25,161 @@
 (defn- math-atan [value] (#?(:clj Math/atan :cljs js/Math.atan) value))
 (defn- math-atan2 [y x] (#?(:clj Math/atan2 :cljs js/Math.atan2) y x))
 
+(def ^:private shared-parameter-guid-pattern
+  #"(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+
+(defn- validate-shared-parameters [shared]
+  (let [by-guid (group-by :guid (vals shared))]
+    (doseq [[parameter spec] shared]
+      (when-not (and (string? (:guid spec))
+                     (re-matches shared-parameter-guid-pattern (:guid spec)))
+        (throw (ex-info "shared parameter requires a UUID GUID"
+                        {:parameter parameter :guid (:guid spec)}))))
+    (when-let [[guid definitions] (first (filter #(> (count (val %)) 1) by-guid))]
+      (throw (ex-info "duplicate shared parameter GUID"
+                      {:guid guid :definitions definitions})))
+    shared))
+
 (defn family-definition
   [{:keys [id name category parameters formulas reference-planes sketches constraints
-           adaptive host types template]}]
-  {:family/id id :family/name name :family/category category
-   :family/parameters (or parameters {}) :family/formulas (or formulas {})
-   :family/reference-planes (or reference-planes {})
-   :family/sketches (or sketches {}) :family/adaptive adaptive :family/host host
-   :family/constraints (vec constraints) :family/types (or types {})
-   :family/template template :family/schema-version schema-version})
+           adaptive host types template shared-parameters]}]
+  (let [shared (validate-shared-parameters (or shared-parameters {}))]
+    (when-let [parameter (first (filter (set (keys shared)) (keys parameters)))]
+      (throw (ex-info "shared and local parameter names conflict"
+                      {:parameter parameter})))
+    {:family/id id :family/name name :family/category category
+     :family/parameters (merge shared (or parameters {}))
+     :family/shared-parameters shared :family/formulas (or formulas {})
+     :family/reference-planes (or reference-planes {})
+     :family/sketches (or sketches {}) :family/adaptive adaptive :family/host host
+     :family/constraints (vec constraints) :family/types (or types {})
+     :family/template template :family/schema-version schema-version}))
 
 (defn family-catalog [families]
-  {:family-catalog/schema-version schema-version
-   :family-catalog/families (into {} (map (juxt :family/id identity) families))})
+  (let [ids (map :family/id families)
+        shared (mapcat (comp vals :family/shared-parameters) families)
+        by-guid (group-by :guid shared)]
+    (when-not (= (count ids) (count (distinct ids)))
+      (throw (ex-info "duplicate family id in catalog" {:ids ids})))
+    (doseq [[guid definitions] by-guid]
+      (when (> (count (set (map #(select-keys % [:type :name]) definitions))) 1)
+        (throw (ex-info "conflicting shared parameter definition"
+                        {:guid guid :definitions definitions}))))
+    {:family-catalog/schema-version schema-version
+     :family-catalog/families (into {} (map (juxt :family/id identity) families))}))
+
+(defn- parse-csv-row [row]
+  (loop [characters (seq row) quoted? false field [] fields []]
+    (if-let [character (first characters)]
+      (let [next-character (second characters)]
+        (cond
+          (and quoted? (= character \" ) (= next-character \"))
+          (recur (nnext characters) quoted? (conj field \" ) fields)
+          (= character \" ) (recur (next characters) (not quoted?) field fields)
+          (and (= character \,) (not quoted?))
+          (recur (next characters) quoted? [] (conj fields (apply str field)))
+          :else (recur (next characters) quoted? (conj field character) fields)))
+      (conj fields (apply str field)))))
+
+(def ^:private catalog-unit-scale
+  {"MILLIMETERS" 0.001 "CENTIMETERS" 0.01 "METERS" 1.0
+   "MILLIMETRES" 0.001 "CENTIMETRES" 0.01 "METRES" 1.0
+   "DEGREES" (/ pi 180.0) "RADIANS" 1.0})
+
+(defn- catalog-value-scale [spec unit]
+  (let [scale (get catalog-unit-scale (string/upper-case (or unit "")) 1.0)]
+    (case (:type spec) :area (* scale scale) :volume (* scale scale scale) scale)))
+
+(defn- parse-catalog-value [spec unit value]
+  (let [number-value #(when-not (string/blank? %)
+                        (#?(:clj Double/parseDouble :cljs js/parseFloat) %))
+        scale (catalog-value-scale spec unit)]
+    (case (:type spec)
+      :boolean (contains? #{"1" "true" "yes"} (string/lower-case value))
+      :integer (long (number-value value))
+      (:length :angle :area :volume :number) (some-> (number-value value) (* scale))
+      :enum (let [allowed (:allowed spec)]
+              (or (some #(when (= (name %) value) %) allowed) value))
+      value)))
+
+(defn import-family-type-catalog
+  "Import a Revit-style type catalog CSV into `:family/types`. Header cells use
+  `Parameter##TYPE##UNIT`; the first column contains the type name."
+  [family csv]
+  (let [rows (mapv parse-csv-row (remove string/blank? (string/split-lines csv)))
+        header (first rows)
+        _ (when (or (empty? rows) (< (count header) 2))
+            (throw (ex-info "type catalog requires a header and parameter columns" {})))
+        _ (doseq [row (rest rows)]
+            (when-not (= (count header) (count row))
+              (throw (ex-info "type catalog row has the wrong column count"
+                              {:row row :expected (count header)}))))
+        type-keys (mapv #(-> (first %) string/lower-case
+                             (string/replace #"[^a-z0-9]+" "-") keyword)
+                        (rest rows))
+        _ (when-not (= (count type-keys) (count (distinct type-keys)))
+            (throw (ex-info "type catalog contains duplicate type names"
+                            {:types type-keys})))
+        descriptors (mapv (fn [cell]
+                            (let [[parameter value-type unit] (string/split cell #"##" -1)]
+                              {:parameter (-> parameter string/lower-case
+                                              (string/replace #"[^a-z0-9]+" "-") keyword)
+                               :value-type value-type :unit unit}))
+                          (rest header))
+        types
+        (into {}
+              (map (fn [row]
+                     (let [type-name (first row)
+                           type-key (-> type-name string/lower-case
+                                        (string/replace #"[^a-z0-9]+" "-") keyword)
+                           parameters
+                           (into {}
+                                 (map (fn [descriptor value]
+                                        (let [parameter (:parameter descriptor)
+                                              spec (get-in family [:family/parameters parameter])]
+                                          (when-not spec
+                                            (throw (ex-info "type catalog references unknown parameter"
+                                                            {:parameter parameter})))
+                                          [parameter (parse-catalog-value
+                                                      spec (:unit descriptor) value)]))
+                                      descriptors (rest row)))]
+                       [type-key {:id (str (:family/id family) ":" (name type-key))
+                                  :name type-name :parameters parameters}])))
+              (rest rows))]
+    (update family :family/types merge types)))
+
+(defn- csv-cell [value]
+  (let [value (str value)]
+    (if (re-find #"[,\"\r\n]" value)
+      (str "\"" (string/replace value "\"" "\"\"") "\"") value)))
+
+(defn export-family-type-catalog
+  "Export named family types as deterministic Revit-style CSV."
+  [family]
+  (let [parameters (->> (:family/parameters family)
+                        (filter (fn [[_ spec]] (= :type (:scope spec))))
+                        (sort-by (comp name key)))
+        unit-name (fn [spec]
+                    (or (:catalog-unit spec)
+                        (case (:type spec) :length "METERS" :angle "RADIANS" "")))
+        type-name (fn [spec]
+                    (case (:type spec) :length "LENGTH" :angle "ANGLE"
+                          :integer "INTEGER" :boolean "YESNO" :text "TEXT"
+                          :material "MATERIAL" :number "NUMBER" "OTHER"))
+        header (cons "" (map (fn [[parameter spec]]
+                               (str (name parameter) "##" (type-name spec) "##" (unit-name spec)))
+                             parameters))
+        render-value (fn [spec value]
+                       (let [scale (catalog-value-scale spec (unit-name spec))
+                             value (if (and (number? value) (not= 1.0 scale))
+                                     (/ value scale) value)]
+                         (if (boolean? value) (if value 1 0) value)))
+        rows (for [[type-key type-spec] (sort-by (comp name key) (:family/types family))]
+               (cons (or (:name type-spec) (name type-key))
+                     (map (fn [[parameter spec]]
+                            (render-value spec (get-in type-spec [:parameters parameter])))
+                          parameters)))]
+    (str (string/join "\n" (map #(string/join "," (map csv-cell %)) (cons header rows))) "\n")))
 
 (defn- eval-expr [params expression]
   (cond
