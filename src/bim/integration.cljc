@@ -1642,6 +1642,85 @@
       (assoc analysis :structural.analysis/combination combination-id
              :structural.analysis/member-checks checks))))
 
+(defn structural-section-properties
+  "Calculate gross section properties in SI units. Rectangle dimensions are
+  width/depth, circles use diameter, and I sections use overall width/depth,
+  web thickness, and flange thickness."
+  [section]
+  (let [properties
+        (case (:kind section)
+          :rectangle
+          (let [width (:width-m section) depth (:depth-m section)
+                area (* width depth)
+                strong (/ (* width depth depth depth) 12.0)
+                weak (/ (* depth width width width) 12.0)]
+            {:area-m2 area :strong-inertia-m4 strong :weak-inertia-m4 weak
+             :strong-modulus-m3 (/ (* 2.0 strong) depth)
+             :weak-modulus-m3 (/ (* 2.0 weak) width)})
+          :circle
+          (let [diameter (:diameter-m section)
+                area (/ (* pi diameter diameter) 4.0)
+                inertia (/ (* pi diameter diameter diameter diameter) 64.0)]
+            {:area-m2 area :strong-inertia-m4 inertia :weak-inertia-m4 inertia
+             :strong-modulus-m3 (/ (* 2.0 inertia) diameter)
+             :weak-modulus-m3 (/ (* 2.0 inertia) diameter)})
+          :i-shape
+          (let [width (:overall-width-m section) depth (:overall-depth-m section)
+                web (:web-thickness-m section) flange (:flange-thickness-m section)
+                web-depth (- depth (* 2.0 flange))
+                area (+ (* 2.0 width flange) (* web web-depth))
+                strong (+ (* 2.0 (+ (/ (* width flange flange flange) 12.0)
+                                      (* width flange
+                                         (pow (- (/ depth 2.0) (/ flange 2.0)) 2.0))))
+                          (/ (* web web-depth web-depth web-depth) 12.0))
+                weak (+ (* 2.0 (/ (* flange width width width) 12.0))
+                        (/ (* web-depth web web web) 12.0))]
+            {:area-m2 area :strong-inertia-m4 strong :weak-inertia-m4 weak
+             :strong-modulus-m3 (/ (* 2.0 strong) depth)
+             :weak-modulus-m3 (/ (* 2.0 weak) width)})
+          (throw (ex-info "unsupported structural section" {:section section})))]
+    (when (some #(not (pos? %)) (vals properties))
+      (throw (ex-info "structural section dimensions must be positive" {:section section})))
+    (merge section properties)))
+
+(defn simply-supported-beam-check
+  "Elastic strong-axis check for a simply supported prismatic beam under a
+  uniform line load. Combines axial and bending stress and checks service
+  deflection against `span / deflection-limit-ratio`."
+  [{:keys [span-m section elastic-modulus-pa yield-strength-pa
+           uniform-load-n-m axial-force-n resistance-factor
+           deflection-limit-ratio]}]
+  (let [{:keys [area-m2 strong-inertia-m4 strong-modulus-m3] :as properties}
+        (structural-section-properties section)
+        _ (when (some #(not (pos? (or % 0.0)))
+                      [span-m elastic-modulus-pa yield-strength-pa])
+            (throw (ex-info "beam span and material properties must be positive"
+                            {:span-m span-m})))
+        factor (or resistance-factor 0.9)
+        limit-ratio (or deflection-limit-ratio 360.0)
+        load (math-abs (or uniform-load-n-m 0.0))
+        axial (math-abs (or axial-force-n 0.0))
+        moment (/ (* load span-m span-m) 8.0)
+        shear (/ (* load span-m) 2.0)
+        deflection (/ (* 5.0 load (pow span-m 4.0))
+                      (* 384.0 elastic-modulus-pa strong-inertia-m4))
+        axial-stress (/ axial area-m2)
+        bending-stress (/ moment strong-modulus-m3)
+        combined-stress (+ axial-stress bending-stress)
+        resistance (* factor yield-strength-pa)
+        strength-utilization (/ combined-stress resistance)
+        deflection-limit (/ span-m limit-ratio)
+        deflection-utilization (/ deflection deflection-limit)
+        utilization (max strength-utilization deflection-utilization)]
+    {:beam/span-m span-m :beam/section-properties properties
+     :beam/reaction-n shear :beam/max-shear-n shear :beam/max-moment-nm moment
+     :beam/max-deflection-m deflection :beam/deflection-limit-m deflection-limit
+     :beam/axial-stress-pa axial-stress :beam/bending-stress-pa bending-stress
+     :beam/combined-stress-pa combined-stress
+     :beam/strength-utilization strength-utilization
+     :beam/deflection-utilization deflection-utilization
+     :beam/utilization utilization :beam/passes? (<= utilization 1.0)}))
+
 (defn structural-member
   "Attach an analytical line, section and load-bearing role to a BIM element."
   [element {:keys [role analytical-axis section material loads]}]
