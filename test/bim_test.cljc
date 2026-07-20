@@ -1267,3 +1267,40 @@
     (is (= 2 (count (re-seq #"class=\"viewport\"" sheet))))
     (is (re-find #"class=\"title-block\"" sheet))
     (is (re-find #"data-sheet-number=\"A-101\"" sheet))))
+
+(deftest view-templates-control-graphics-hidden-lines-and-annotations
+  (let [wall-a (bim/wall {:id 201 :start [0 0 0] :end [6 0 0] :height 3.0})
+        wall-b (bim/wall {:id 202 :start [0 2 0] :end [6 2 0] :height 3.0})
+        slab (bim/slab {:id 203 :boundary [[0 0 0] [6 0 0] [6 4 0] [0 4 0]]
+                        :thickness 0.2})
+        storey (bim/storey {:id 30 :name "Template Plan" :elevation 0 :height 3
+                            :placement :identity :spaces [] :elements [wall-a wall-b slab]})
+        building (bim/building {:id 31 :name "Template Building" :placement :identity
+                                :reference-elevation 0 :storeys [storey]})
+        template (integration/view-template
+                  {:id :architectural-plan :name "Architectural Plan" :scale 50
+                   :hidden-line? true :show-tags? false
+                   :category-visibility {:slab false}
+                   :category-overrides {:wall {:stroke "#ff0000"}}
+                   :annotation-style {:fill "#7c3aed"}})
+        view (integration/drawing-view
+              {:id :ground :kind :floor-plan :name "Ground" :template-id :architectural-plan
+               :annotations [{:kind :text :point [1 1] :text "Grid note"}
+                             {:kind :level :point [0 1.5] :width 80 :label "Level 0"}
+                             {:kind :dimension :from [0 0] :to [6 0]
+                              :offset 22 :label "6000"}]})
+        options (integration/apply-view-template view template)
+        plan-svg (drawing/documented-floor-plan-svg storey options)
+        hidden (drawing/orthographic-view-svg
+                building {:kind :elevation :axis :x :cut-position 0 :hidden-line? true})
+        wire (drawing/orthographic-view-svg
+              building {:kind :elevation :axis :x :cut-position 0 :hidden-line? false})]
+    (is (= 50 (:scale options)))
+    (is (not (re-find #"<polygon" plan-svg)))
+    (is (not (re-find #"class=\"element-tag\"" plan-svg)))
+    (is (re-find #"class=\"text-annotation\"" plan-svg))
+    (is (re-find #"class=\"level-annotation\"" plan-svg))
+    (is (re-find #"6000" plan-svg))
+    (is (re-find #"#ff0000" plan-svg))
+    (is (< (count (re-seq #"data-element-id=" hidden))
+           (count (re-seq #"data-element-id=" wire))))))

@@ -679,14 +679,48 @@
                          :void/id (:id void)})
                       geometry (:voids instance))))))
 
+(defn view-template
+  [{:keys [id name discipline scale detail-level hidden-line? show-tags?
+           category-visibility category-overrides annotation-style]}]
+  {:view-template/id id :view-template/name name
+   :view-template/discipline (or discipline :architectural)
+   :view-template/scale (or scale 100)
+   :view-template/detail-level (or detail-level :medium)
+   :view-template/hidden-line? (if (nil? hidden-line?) true hidden-line?)
+   :view-template/show-tags? (if (nil? show-tags?) true show-tags?)
+   :view-template/category-visibility (or category-visibility {})
+   :view-template/category-overrides (or category-overrides {})
+   :view-template/annotation-style (or annotation-style {})})
+
 (defn drawing-view
   [{:keys [id kind name scale storey-id building-id section-box cut-plane direction
-           discipline annotations]}]
+           discipline annotations template-id overrides]}]
   {:view/id id :view/kind kind :view/name name :view/scale (or scale 100)
+   :view/scale-explicit? (some? scale)
    :view/storey-id storey-id :view/building-id building-id
    :view/section-box section-box :view/cut-plane cut-plane :view/direction direction
    :view/annotations (vec annotations)
-   :view/discipline (or discipline :architectural)})
+   :view/discipline (or discipline :architectural)
+   :view/template-id template-id :view/overrides (or overrides {})})
+
+(defn apply-view-template
+  "Resolve a drawing view and template into renderer options. View overrides
+  win without mutating the shared template."
+  [view template]
+  (when (and (:view/template-id view)
+             (not= (:view/template-id view) (:view-template/id template)))
+    (throw (ex-info "view template id does not match" {:view (:view/id view)})))
+  (merge {:scale (:view-template/scale template)
+          :discipline (:view-template/discipline template)
+          :detail-level (:view-template/detail-level template)
+          :hidden-line? (:view-template/hidden-line? template)
+          :show-tags? (:view-template/show-tags? template)
+          :category-visibility (:view-template/category-visibility template)
+          :category-overrides (:view-template/category-overrides template)
+          :annotation-style (:view-template/annotation-style template)
+          :annotations (:view/annotations view)}
+         (:view/overrides view)
+         (when (:view/scale-explicit? view) {:scale (:view/scale view)})))
 
 (defn drawing-sheet [{:keys [id number name size views revisions]}]
   {:sheet/id id :sheet/number number :sheet/name name :sheet/size (or size :a1)
