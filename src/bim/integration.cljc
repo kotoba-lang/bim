@@ -2,6 +2,7 @@
   "Portable contracts that connect BIM authoring, drawings, IFC exchange,
   collaboration, and cloud-itonami. All functions are pure and CLJC-safe."
   (:require [clojure.walk :as walk]
+            [bim :as bim]
             [ifc.core :as ifc]
             [kotoba.document.change :as document-change]))
 
@@ -98,6 +99,71 @@
   (when-not (= "IFC4X3_ADD2" (:ifc/schema document))
     (throw (ex-info "unsupported IFC schema" {:schema (:ifc/schema document)})))
   (get-in document [:ifc/project :model]))
+
+(defn- spatial-descendants [node type]
+  (filter #(= type (:type %)) (tree-seq #(seq (:children %)) :children node)))
+
+(defn- imported-element [source]
+  (let [[x y z] (get-in source [:placement :location] [0.0 0.0 0.0])
+        geometry (:geometry source)
+        profile (:profile geometry)
+        x-dim (:x-dim profile) y-dim (:y-dim profile) depth (:depth geometry)
+        result
+        (case (:kind source)
+          :wall (if (and x-dim y-dim depth)
+                  (bim/wall {:id (:id source) :name (:name source)
+                             :start [x y z] :end [(+ x x-dim) y z]
+                             :thickness y-dim :height depth})
+                  (bim/element {:id (:id source) :kind :wall :name (:name source)
+                                :geometry geometry}))
+          :slab (if (and x-dim y-dim depth)
+                  (bim/slab {:id (:id source) :name (:name source)
+                             :boundary [[x y z] [(+ x x-dim) y z]
+                                        [(+ x x-dim) (+ y y-dim) z] [x (+ y y-dim) z]]
+                             :thickness depth})
+                  (bim/element {:id (:id source) :kind :slab :name (:name source)
+                                :geometry geometry}))
+          (bim/element {:id (:id source) :kind (:kind source) :name (:name source)
+                        :placement (:placement source) :geometry geometry}))]
+    (assoc result :global-id (:global-id source) :ifc/source-id (:id source))))
+
+(defn import-external-ifc
+  "Map a shared IFC exchange document into the BIM spatial hierarchy."
+  [document]
+  (if-let [model (get-in document [:ifc/project :model])]
+    model
+    (let [root (:ifc/project document)
+          sites (spatial-descendants root :ifcsite)
+          buildings (spatial-descendants root :ifcbuilding)
+          storeys (spatial-descendants root :ifcbuildingstorey)
+          elements-by-storey (group-by :container-id (:ifc/elements document))
+          storey-models (into {}
+                              (map (fn [node]
+                                     [(:id node)
+                                      (bim/storey {:id (:id node) :name (:name node)
+                                                   :elevation (or (get-in node [:placement :location 2]) 0.0)
+                                                   :height 3.0 :placement (:placement node)
+                                                   :spaces []
+                                                   :elements (mapv imported-element
+                                                                   (get elements-by-storey (:id node)))})]))
+                              storeys)
+          building-models (mapv (fn [node]
+                                  (bim/building {:id (:id node) :name (:name node)
+                                                 :placement (:placement node) :reference-elevation 0.0
+                                                 :storeys (mapv #(get storey-models (:id %))
+                                                                (filter (comp #{:ifcbuildingstorey} :type)
+                                                                        (:children node)))}))
+                                buildings)
+          site-node (first sites)]
+      {:id (or (:global-id root) (:id root)) :name (:name root) :description ""
+       :units (bim/unit-system) :world-origin [0.0 0.0 0.0] :true-north-rad 0.0
+       :psets {}
+       :sites [(bim/site {:id (or (:id site-node) 1) :name (or (:name site-node) "Site")
+                          :geo nil :placement (:placement site-node)
+                          :buildings building-models})]})))
+
+(defn import-ifc-spf [text]
+  (import-external-ifc (ifc/read-document text)))
 
 (defn structural-member
   "Attach an analytical line, section and load-bearing role to a BIM element."

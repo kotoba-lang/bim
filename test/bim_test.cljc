@@ -181,3 +181,28 @@
     (is (= project (ifc/read-spf spf)))
     (is (re-find #"<svg" svg))
     (is (re-find #"<line" svg))))
+
+(deftest imports-external-ifc-hierarchy-and-wall-geometry
+  (let [document {:ifc/schema "IFC4X3_ADD2"
+                  :ifc/project {:id 1 :global-id "project-guid" :name "Tower"
+                                :type :ifcproject
+                                :children [{:id 2 :name "Site" :type :ifcsite
+                                            :children [{:id 3 :name "Building" :type :ifcbuilding
+                                                        :children [{:id 4 :name "Ground" :type :ifcbuildingstorey
+                                                                    :placement {:location [0 0 0]}
+                                                                    :children []}]}]}]}
+                  :ifc/elements [{:id 100 :global-id "wall-guid" :name "External Wall"
+                                  :kind :wall :container-id 4
+                                  :placement {:location [10 20 0]}
+                                  :geometry {:kind :extruded-area-solid
+                                             :profile {:kind :rectangle :x-dim 8.0 :y-dim 0.25}
+                                             :direction [0 0 1] :depth 3.2}}]}
+        project (integration/import-external-ifc document)
+        storey (bim/find-storey project 4)
+        wall (first (:elements storey))]
+    (is (= "Tower" (:name project)))
+    (is (= "Ground" (:name storey)))
+    (is (= "wall-guid" (:global-id wall)))
+    (is (= [[10 20 0] [18.0 20 0]] (get-in wall [:geometry :axis])))
+    (is (= 0.25 (get-in wall [:geometry :profile :thickness])))
+    (is (= 3.2 (get-in wall [:geometry :profile :height])))))
