@@ -1790,6 +1790,36 @@
     (if (> (count (:material-layers updated)) 1)
       (set-wall-layers updated (:material-layers updated)) updated)))
 
+(defn rehost-wall-element
+  "Atomically move a hosted door/window and its opening to another wall."
+  [project storey-id element-id new-host-id {:keys [offset sill]}]
+  (let [storey (find-storey project storey-id)
+        by-id (into {} (map (juxt :id identity) (:elements storey)))
+        hosted (get by-id element-id)
+        [old-host-id opening-id] (:connected-to hosted)
+        old-host (get by-id old-host-id) new-host (get by-id new-host-id)
+        old-opening (first (filter #(= opening-id (:id %)) (:openings old-host)))]
+    (when-not (contains? #{:door :window} (:kind hosted))
+      (throw (ex-info "rehost requires a hosted door or window" {:element-id element-id})))
+    (when-not (and (= :wall (:kind old-host)) (= :wall (:kind new-host)) old-opening)
+      (throw (ex-info "rehost requires valid old and new wall hosts"
+                      {:old-host-id old-host-id :new-host-id new-host-id})))
+    (when-not (and (finite-number? offset) (not (neg? offset))
+                   (finite-number? sill) (not (neg? sill)))
+      (throw (ex-info "rehost offset and sill must be non-negative"
+                      {:offset offset :sill sill})))
+    (let [moved-opening (-> old-opening
+                            (assoc :placement {:offset offset :sill sill}
+                                   :depth (get-in new-host [:geometry :profile :thickness])))
+          project-without-old (update-element project storey-id old-host-id
+                                              remove-opening-from-wall opening-id)
+          project-with-new (update-element project-without-old storey-id new-host-id
+                                           add-opening-to-wall moved-opening)]
+      (update-element project-with-new storey-id element-id
+                      assoc :connected-to [new-host-id opening-id]
+                      :placement {:kind :hosted :host-id new-host-id
+                                  :offset offset :sill sill}))))
+
 (defn wall-mesh
   "Convert a horizontal axis-sweep rectangle wall into an indexed box mesh."
   [{:keys [geometry]}]

@@ -1933,3 +1933,34 @@
            (bim/slab {:id 301 :boundary [[0 0 0] [4 0 0] [4 4 0] [0 4 0]]})
            (bim/slab-opening {:id 302 :boundary [[1 1 0] [2 1 0] [2 2 0] [1 2 0]]}))
           [0.0 0.1 0.2 0.0])))))
+
+(deftest hosted-door-rehost-moves-opening-atomically
+  (let [opening (bim/rectangular-opening
+                 {:id 401 :offset 2.0 :sill 0.0 :width 0.9 :height 2.1
+                  :filled-by 400})
+        source-wall (-> (bim/wall {:id 410 :start [0 0 0] :end [8 0 0]})
+                        (bim/add-opening-to-wall opening))
+        target-wall (bim/wall {:id 411 :start [0 4 0] :end [10 4 0]
+                               :thickness 0.3})
+        door (bim/door {:id 400 :host-id 410 :opening-id 401 :width 0.9 :height 2.1})
+        project (-> (integrated-project)
+                    (bim/add-element 3 source-wall)
+                    (bim/add-element 3 target-wall)
+                    (bim/add-element 3 door))
+        moved (bim/rehost-wall-element project 3 400 411 {:offset 5.0 :sill 0.1})
+        elements (get-in moved [:sites 0 :buildings 0 :storeys 0 :elements])
+        by-id (into {} (map (juxt :id identity) elements))]
+    (is (empty? (get-in by-id [410 :openings])))
+    (is (= 401 (get-in by-id [411 :openings 0 :id])))
+    (is (= {:offset 5.0 :sill 0.1}
+           (get-in by-id [411 :openings 0 :placement])))
+    (is (= 0.3 (get-in by-id [411 :openings 0 :depth])))
+    (is (= [411 401] (get-in by-id [400 :connected-to])))
+    (is (= {:kind :hosted :host-id 411 :offset 5.0 :sill 0.1}
+           (get-in by-id [400 :placement])))
+    (is (thrown-with-msg?
+         #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+         #"exceeds wall bounds"
+         (bim/rehost-wall-element project 3 400 411 {:offset 9.5 :sill 0.0})))
+    (is (= opening (get-in source-wall [:openings 0]))
+        "failed rehost leaves the immutable source project unchanged")))
