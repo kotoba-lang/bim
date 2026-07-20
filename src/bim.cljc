@@ -1447,12 +1447,80 @@
         [(set-wall-axis left (replace-nearest-endpoint left-axis left-point))
          (set-wall-axis right (replace-nearest-endpoint right-axis right-point))]))))
 
+(defn- wall-plan-direction-toward [[start end] point]
+  (let [[joint-index other] (if (<= (distance3 start point) (distance3 end point))
+                              [0 end] [1 start])
+        vector (mapv - point other)
+        length (sqrt (+ (* (first vector) (first vector))
+                        (* (second vector) (second vector))))]
+    {:joint-index joint-index
+     :direction [(/ (first vector) length) (/ (second vector) length) 0.0]}))
+
+(defn- replace-axis-endpoint [axis index point]
+  (assoc (vec axis) index (vec point)))
+
 (defn join-walls
-  "Join two walls at their plan intersection and retain the join relationship."
-  [left right]
-  (when-let [[joined-left joined-right] (trim-extend-walls left right)]
-    [(update joined-left :wall/joins (fnil conj #{}) (:id right))
-     (update joined-right :wall/joins (fnil conj #{}) (:id left))]))
+  "Join two walls with solid-cleanup geometry and reciprocal relationships.
+
+  Butt joins continue the priority wall through the full width of the other
+  wall and stop the secondary wall at its near face, avoiding both gaps and
+  overlapping solids. `:priority` is `:left` or `:right`; `:style :centerline`
+  retains the legacy centerline intersection."
+  ([left right] (join-walls left right {:style :butt :priority :left}))
+  ([left right {:keys [style priority] :or {style :butt priority :left}}]
+   (when-not (contains? #{:butt :centerline} style)
+     (throw (ex-info "unsupported wall join style" {:style style})))
+   (when-not (contains? #{:left :right} priority)
+     (throw (ex-info "unsupported wall join priority" {:priority priority})))
+   (when-let [[center-left center-right] (trim-extend-walls left right)]
+     (let [intersection (first (filter (set (get-in center-right [:geometry :axis]))
+                                       (get-in center-left [:geometry :axis])))
+           [primary secondary swapped?]
+           (if (= :left priority)
+             [center-left center-right false] [center-right center-left true])
+           primary-axis (get-in primary [:geometry :axis])
+           secondary-axis (get-in secondary [:geometry :axis])
+           primary-approach (wall-plan-direction-toward primary-axis intersection)
+           secondary-approach (wall-plan-direction-toward secondary-axis intersection)
+           dot (#?(:clj Math/abs :cljs js/Math.abs)
+                (reduce + (map * (:direction primary-approach)
+                               (:direction secondary-approach))))
+           sine (sqrt (max 0.0 (- 1.0 (* dot dot))))]
+       (when (< sine 1.0e-6)
+         (throw (ex-info "wall join requires non-parallel walls"
+                         {:left-id (:id left) :right-id (:id right)})))
+       (let [primary-extension (/ (get-in secondary [:geometry :profile :thickness])
+                                  (* 2.0 sine))
+             secondary-trim (/ (get-in primary [:geometry :profile :thickness])
+                                (* 2.0 sine))
+             primary-target (mapv + intersection
+                                  (mapv #(* primary-extension %)
+                                        (:direction primary-approach)))
+             secondary-target (mapv - intersection
+                                  (mapv #(* secondary-trim %)
+                                        (:direction secondary-approach)))
+             cleaned-primary
+             (if (= :butt style)
+               (set-wall-axis primary
+                              (replace-axis-endpoint primary-axis
+                                                     (:joint-index primary-approach)
+                                                     primary-target)) primary)
+             cleaned-secondary
+             (if (= :butt style)
+               (set-wall-axis secondary
+                              (replace-axis-endpoint secondary-axis
+                                                     (:joint-index secondary-approach)
+                                                     secondary-target)) secondary)
+             annotate (fn [wall other role]
+                        (-> wall
+                            (update :wall/joins (fnil conj #{}) (:id other))
+                            (assoc-in [:wall/join-details (:id other)]
+                                      {:style style :role role})))]
+         (if swapped?
+           [(annotate cleaned-secondary cleaned-primary :secondary)
+            (annotate cleaned-primary cleaned-secondary :primary)]
+           [(annotate cleaned-primary cleaned-secondary :primary)
+            (annotate cleaned-secondary cleaned-primary :secondary)]))))))
 
 (defn merge-meshes [meshes]
   (loop [remaining meshes positions [] normals [] indices []]
