@@ -320,6 +320,9 @@
         changed (integration/merge-events project [event])
         payload (integration/cloud-itonami-payload changed 7)]
     (is (= :floor-plan (get-in drawings [:drawing/views 0 :view/kind])))
+    (is (= #{:floor-plan :section :elevation}
+           (set (map :view/kind (:drawing/views drawings)))))
+    (is (= "P01" (get-in drawings [:drawing/sheets 0 :sheet/revisions 0 :revision])))
     (is (= project (integration/import-ifc ifc)))
     (is (= :wall (get-in ifc [:ifc/elements 0 :kind])))
     (is (= "Issued for coordination" (:description changed)))
@@ -625,3 +628,39 @@
                               :first-operand operand-a :second-operand operand-b}})]
         (is (seq (:indices mesh)))
         (is (< (#?(:clj Math/abs :cljs js/Math.abs) (- expected (volume mesh))) 1.0e-6))))))
+
+(deftest generates-annotated-plans-sections-elevations-and-sheets
+  (let [opening (bim/rectangular-opening {:id 900 :offset 2.0 :sill 0.0
+                                          :width 1.0 :height 2.1})
+        wall-a (bim/add-opening-to-wall
+                (bim/wall {:id 101 :start [0 0 0] :end [6 0 0] :height 3.0}) opening)
+        wall-b (bim/wall {:id 102 :start [0 2 0] :end [6 2 0] :height 3.0})
+        slab (bim/slab {:id 103 :boundary [[0 0 0] [6 0 0] [6 4 0] [0 4 0]]
+                        :thickness 0.2})
+        storey (bim/storey {:id 10 :name "Ground" :elevation 0 :height 3
+                            :placement :identity :spaces [] :elements [wall-a wall-b slab]})
+        building (bim/building {:id 20 :name "Drawing Building" :placement :identity
+                                :reference-elevation 0 :storeys [storey]})
+        plan (drawing/documented-floor-plan storey)
+        plan-svg (drawing/documented-floor-plan-svg storey)
+        section (drawing/orthographic-view building {:kind :section :axis :x
+                                                       :cut-position 0.0 :depth 3.0})
+        section-svg (drawing/orthographic-view-svg building {:kind :section :axis :x
+                                                              :cut-position 0.0 :depth 3.0})
+        elevation (drawing/orthographic-view-svg building {:kind :elevation :axis :x
+                                                            :cut-position 0.0})
+        sheet (drawing/drawing-sheet-svg
+               {:number "A-101" :name "General Arrangement" :size :a1 :revision "C01"
+                :viewports [{:view plan :x 20 :y 20 :width 380 :height 260
+                             :title "Ground Plan" :scale 100}
+                            {:view section :x 430 :y 20 :width 380 :height 260
+                             :title "Section A" :scale 50}]})]
+    (is (re-find #"class=\"dimension\"" plan-svg))
+    (is (re-find #"class=\"opening\"" plan-svg))
+    (is (re-find #"class=\"element-tag\"" plan-svg))
+    (is (re-find #"class=\"cut-element\"" section-svg))
+    (is (re-find #"class=\"projected-element\"" section-svg))
+    (is (re-find #"data-view-kind=\"elevation\"" elevation))
+    (is (= 2 (count (re-seq #"class=\"viewport\"" sheet))))
+    (is (re-find #"class=\"title-block\"" sheet))
+    (is (re-find #"data-sheet-number=\"A-101\"" sheet))))

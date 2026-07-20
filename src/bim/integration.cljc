@@ -164,9 +164,12 @@
     (instantiate-family* catalog family type-key instance-id overrides #{family-id})))
 
 (defn drawing-view
-  [{:keys [id kind name scale storey-id section-box discipline]}]
+  [{:keys [id kind name scale storey-id building-id section-box cut-plane direction
+           discipline annotations]}]
   {:view/id id :view/kind kind :view/name name :view/scale (or scale 100)
-   :view/storey-id storey-id :view/section-box section-box
+   :view/storey-id storey-id :view/building-id building-id
+   :view/section-box section-box :view/cut-plane cut-plane :view/direction direction
+   :view/annotations (vec annotations)
    :view/discipline (or discipline :architectural)})
 
 (defn drawing-sheet [{:keys [id number name size views revisions]}]
@@ -180,17 +183,32 @@
   (mapcat :elements (all-storeys project)))
 
 (defn generate-drawing-set
-  "Generate deterministic floor-plan views and one coordination sheet."
+  "Generate deterministic plan, section and elevation view definitions plus
+  coordinated sheets. Renderable SVG views are produced by bim.drawing."
   [project]
-  (let [views (mapv (fn [storey]
+  (let [buildings (mapcat :buildings (:sites project))
+        plans (mapv (fn [storey]
                       (drawing-view {:id (str "plan-" (:id storey)) :kind :floor-plan
-                                     :name (:name storey) :storey-id (:id storey)}))
-                    (all-storeys project))]
+                                     :name (str (:name storey) " Plan") :storey-id (:id storey)
+                                     :cut-plane {:elevation (+ (:elevation storey) 1.2)}}))
+                    (all-storeys project))
+        orthographic
+        (mapcat (fn [building]
+                  [(drawing-view {:id (str "section-" (:id building) "-a") :kind :section
+                                  :name (str (:name building) " Section A")
+                                  :building-id (:id building) :scale 50
+                                  :cut-plane {:axis :x :position 0.0} :direction :north})
+                   (drawing-view {:id (str "elevation-" (:id building) "-north") :kind :elevation
+                                  :name (str (:name building) " North Elevation")
+                                  :building-id (:id building) :scale 100 :direction :north})])
+                buildings)
+        views (vec (concat plans orthographic))]
     {:drawing/schema-version schema-version
      :drawing/views views
      :drawing/sheets [(drawing-sheet {:id "A-001" :number "A-001"
                                       :name "General Arrangements"
-                                      :views (mapv :view/id views)})]}))
+                                      :views (mapv :view/id views)
+                                      :revisions [{:revision "P01" :status :preliminary}]})]}))
 
 (defn- exported-geometry [element]
   (let [geometry (:geometry element)]
