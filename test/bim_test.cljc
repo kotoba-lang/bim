@@ -812,6 +812,42 @@
     (is (= [0.0 0.0 -9.80665]
            (get-in model [:structural/load-cases 0 :structural.load-case/gravity])))))
 
+(deftest transfers-area-wind-and-seismic-loads-to-analytical-nodes
+  (let [points {:b1 [0 0 0] :b2 [6 0 0] :b3 [6 4 0] :b4 [0 4 0]
+                :t1 [0 0 3] :t2 [6 0 3] :t3 [6 4 3] :t4 [0 4 3]}
+        nodes (mapv (fn [[id point]]
+                      (integration/structural-node
+                       {:id id :point point
+                        :restraints (if (zero? (nth point 2))
+                                      [true true true] [false false false])})) points)
+        members (mapv (fn [[index [bottom top]]]
+                        (integration/structural-analysis-member
+                         {:id (keyword (str "c" index)) :start-node bottom :end-node top
+                          :area-m2 0.1 :elastic-modulus-pa 2.0e11
+                          :yield-strength-pa 2.5e8 :density-kg-m3 100.0}))
+                      (map-indexed vector [[:b1 :t1] [:b2 :t2] [:b3 :t3] [:b4 :t4]]))
+        floor {:structural.shell/id :floor
+               :structural.shell/nodes [[0 0 3] [6 0 3] [6 4 3] [0 4 3]]}
+        wall {:structural.shell/id :wall
+              :structural.shell/nodes [[0 0 0] [6 0 0] [6 0 3] [0 0 3]]}
+        model (integration/structural-model {:nodes nodes :members members
+                                             :shells [floor wall]})
+        area (integration/structural-area-load-case
+              model {:pressures-pa {:floor 5000.0} :direction [0 0 -1]})
+        wind (integration/structural-wind-load-case
+              model {:pressure-pa 1000.0 :direction [1 0 0]})
+        seismic (integration/structural-seismic-load-case
+                 model {:coefficient 0.2 :direction [1 0 0]})]
+    (is (= 4 (count (:structural.load-case/nodal-loads area))))
+    (is (= -120000.0 (reduce + (map :fz (:structural.load-case/nodal-loads area)))))
+    (is (= 2 (count (:structural.load-case/nodal-loads wind))))
+    (is (= 18000.0 (reduce + (map :fx (:structural.load-case/nodal-loads wind)))))
+    (is (= 4 (count (:structural.load-case/nodal-loads seismic))))
+    (is (< (#?(:clj Math/abs :cljs js/Math.abs)
+            (- (:structural.load-case/base-shear-n seismic)
+               (reduce + (map :fx (:structural.load-case/nodal-loads seismic)))))
+           1.0e-9))))
+
 (deftest solves-linear-structural-truss-analysis
   (let [model (integration/structural-model
                {:nodes [(integration/structural-node
