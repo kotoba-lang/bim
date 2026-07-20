@@ -785,6 +785,91 @@
                             :post-diameter post-diameter
                             :post-points post-bases}))))
 
+(defn curtain-wall
+  "Construct a rectilinear curtain wall with semantic glass panels, vertical
+  mullions, and horizontal transoms represented as IFC-portable solids."
+  [{:keys [id name start end height columns rows panel-thickness
+           mullion-width frame-depth panel-material frame-material]
+    :or {name "Curtain Wall" height 3.0 columns 4 rows 2 panel-thickness 0.024
+         mullion-width 0.05 frame-depth 0.12 panel-material "Insulated glass"
+         frame-material "Aluminium"}}]
+  (when-not (and (valid-point3? start) (valid-point3? end)
+                 (finite-number? height) (pos? height)
+                 (integer? columns) (pos? columns) (integer? rows) (pos? rows)
+                 (every? #(and (finite-number? %) (pos? %))
+                         [panel-thickness mullion-width frame-depth]))
+    (throw (ex-info "curtain wall requires valid axis, grid, and dimensions"
+                    {:start start :end end :height height :columns columns :rows rows})))
+  (let [[dx dy _] (mapv - end start) length (sqrt (+ (* dx dx) (* dy dy)))]
+    (when (< length 1.0e-9)
+      (throw (ex-info "curtain wall axis must have nonzero plan length" {})))
+    (let [axis [(/ dx length) (/ dy length) 0.0]
+          cell-width (/ length columns) cell-height (/ height rows)
+          panel-width (- cell-width mullion-width)
+          panel-height (- cell-height mullion-width)]
+      (when (or (not (pos? panel-width)) (not (pos? panel-height)))
+        (throw (ex-info "curtain grid cells must exceed mullion width"
+                        {:cell-width cell-width :cell-height cell-height
+                         :mullion-width mullion-width})))
+      (let [at-distance (fn [distance z]
+                          (-> (mapv + start (mapv #(* distance %) axis))
+                              (update 2 + z)))
+            panel-solid
+            (fn [column row]
+              {:kind :extruded-area-solid
+               :position {:location (at-distance (* (+ column 0.5) cell-width)
+                                                 (+ (* row cell-height)
+                                                    (/ mullion-width 2.0)))
+                          :axis [0.0 0.0 1.0] :ref-direction axis}
+               :profile {:kind :rectangle :x-dim panel-width :y-dim panel-thickness}
+               :direction [0.0 0.0 1.0] :depth panel-height})
+            mullion-solid
+            (fn [column]
+              {:kind :extruded-area-solid
+               :position {:location (at-distance (* column cell-width) 0.0)
+                          :axis [0.0 0.0 1.0] :ref-direction axis}
+               :profile {:kind :rectangle :x-dim mullion-width :y-dim frame-depth}
+               :direction [0.0 0.0 1.0] :depth height})
+            transom-solid
+            (fn [row]
+              {:kind :extruded-area-solid
+               :position {:location (at-distance (/ length 2.0)
+                                                 (cond (= row 0) 0.0
+                                                       (= row rows) (- height mullion-width)
+                                                       :else (- (* row cell-height)
+                                                                (/ mullion-width 2.0))))
+                          :axis [0.0 0.0 1.0] :ref-direction axis}
+               :profile {:kind :rectangle :x-dim length :y-dim frame-depth}
+               :direction [0.0 0.0 1.0] :depth mullion-width})
+            panels (mapv (fn [[column row]] (panel-solid column row))
+                         (for [row (range rows) column (range columns)] [column row]))
+            mullions (mapv mullion-solid (range (inc columns)))
+            transoms (mapv transom-solid (range (inc rows)))
+            panel-count (* columns rows)
+            glazed-area (* panel-count panel-width panel-height)]
+        (assoc
+         (element
+          {:id id :kind :curtain :name name :global-id (str id) :placement :identity
+           :geometry {:kind :collection :items (vec (concat panels mullions transoms))}
+           :material-layers [(material-layer panel-material panel-thickness false :glass)
+                             (material-layer frame-material mullion-width false :steel)]
+           :classification (classification-ref "Uniclass" "Ss_25_10_20_35"
+                                                "Curtain wall systems")
+           :quantities (quantities {:length-m length :height-m height
+                                    :gross-area-m2 (* length height)
+                                    :net-area-m2 glazed-area :panel-count panel-count
+                                    :mullion-count (inc columns)
+                                    :transom-count (inc rows)})
+           :psets {"Pset_CurtainWallCommon"
+                   (property-set "Pset_CurtainWallCommon"
+                                 {:IsExternal (bool-value true)
+                                  :Reference (text-value name)})}
+           :openings [] :connected-to []})
+         :curtain/definition {:kind :grid :axis [(vec start) (vec end)] :height height
+                              :columns columns :rows rows :cell-width cell-width
+                              :cell-height cell-height :panel-thickness panel-thickness
+                              :mullion-width mullion-width :frame-depth frame-depth})))))
+
 (defn- point3 [point]
   (let [[x y & [z]] (or point [0.0 0.0 0.0])]
     [(or x 0.0) (or y 0.0) (or z 0.0)]))
