@@ -523,7 +523,10 @@
 
 (deftest bim-external-ifc-provenance-preserves-space-and-vendor-entities-on-edit
   (let [project (update-in
-                 (integrated-project)
+                 (bim/add-element
+                  (integrated-project) 3
+                  (bim/element {:id 12 :kind :door :name "Temporary Door"
+                                :placement :identity :geometry nil}))
                  [:sites 0 :buildings 0 :storeys 0 :spaces]
                  conj (bim/space {:id 40 :name "Office 101" :long-name "Open Office"
                                   :category :office :boundary [] :height 3.2
@@ -536,11 +539,24 @@
         imported-storey (get-in imported [:sites 0 :buildings 0 :storeys 0])
         imported-wall (first (filter #(= "10" (:global-id %))
                                      (:elements imported-storey)))
-        edited (bim/update-element imported (:id imported-storey) (:id imported-wall)
-                                   assoc :name "Edited in Kotoba")
+        imported-door (first (filter #(= "12" (:global-id %))
+                                     (:elements imported-storey)))
+        edited (-> imported
+                   (bim/update-element (:id imported-storey) (:id imported-wall)
+                                       assoc :name "Edited in Kotoba" :kind :column)
+                   (bim/delete-element (:id imported-storey) (:id imported-door))
+                   (bim/add-element
+                    (:id imported-storey)
+                    (bim/element {:id 50 :global-id "added-beam-guid" :kind :beam
+                                  :name "Added Beam" :placement {:location [1 2 3]}
+                                  :geometry {:kind :extruded-area-solid
+                                             :profile {:kind :rectangle
+                                                       :x-dim 0.3 :y-dim 0.5}
+                                             :direction [1 0 0] :depth 4.0}})))
         output (ifc/write-standard-spf edited)
         reimported (ifc/read-document output)
-        wall (first (filter #(= "10" (:global-id %)) (:ifc/elements reimported)))]
+        by-global (into {} (map (juxt :global-id identity) (:ifc/elements reimported)))
+        wall (get by-global "10")]
     (is (= "IFC4X3_ADD2" (:ifc/schema imported)))
     (is (= "Open Office"
            (get-in imported [:sites 0 :buildings 0 :storeys 0 :spaces 0 :long-name])))
@@ -549,7 +565,11 @@
     (is (map? (:ifc/source-document imported)))
     (is (string/includes? output "IFCANNOTATION"))
     (is (string/includes? output "'Keep Vendor Data'"))
-    (is (= "Edited in Kotoba" (:name wall)))))
+    (is (= "Edited in Kotoba" (:name wall)))
+    (is (= :column (:kind wall)))
+    (is (nil? (get by-global "12")))
+    (is (= :beam (get-in by-global ["added-beam-guid" :kind])))
+    (is (= 4.0 (get-in by-global ["added-beam-guid" :geometry :depth])))))
 
 (deftest imports-external-ifc-hierarchy-and-wall-geometry
   (let [document {:ifc/schema "IFC4X3_ADD2"
