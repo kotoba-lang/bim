@@ -329,6 +329,34 @@
                           (integration/instantiate-family-type catalog "cabinet" :wide 71
                                                                {:width 1.5})))))
 
+(deftest family-conditional-scientific-and-visibility-formulas
+  (let [family (integration/family-definition
+                {:id "parametric-panel" :name "Parametric Panel" :category :furniture
+                 :parameters {:width {:type :length :default 1.2 :min 0.1}
+                              :height {:type :length :default 0.9 :min 0.1}
+                              :enabled {:type :boolean :default true}}
+                 :formulas
+                 {:area [:* [:param :width] [:param :height]]
+                  :diagonal [:sqrt [:+ [:pow [:param :width] 2]
+                                      [:pow [:param :height] 2]]]
+                  :panel-count [:ceil [:/ [:param :width] 0.6]]
+                  :large? [:>= [:param :area] 1.0]
+                  :visible? [:and [:param :enabled] [:param :large?]]
+                  :safe-width [:if [:> [:param :width] 0]
+                               [:param :width] [:/ 1 0]]}
+                 :template {:kind :furniture :name "Parametric Panel"
+                            :visible [:param :visible?]
+                            :geometry {:kind :panel :width [:param :safe-width]
+                                       :height [:param :height]
+                                       :panel-count [:param :panel-count]}}})
+        instance (integration/instantiate-family family 72 {})]
+    (is (= 1.08 (get-in instance [:family/parameters :area])))
+    (is (= 1.5 (get-in instance [:family/parameters :diagonal])))
+    (is (= 2.0 (get-in instance [:family/parameters :panel-count])))
+    (is (true? (:visible instance)))
+    (is (= 1.2 (get-in instance [:geometry :width])))
+    (is (= 2.0 (get-in instance [:geometry :panel-count])))))
+
 (deftest reference-plane-constraints-drive-family-geometry
   (let [family (integration/family-definition
                 {:id "window-double" :name "Double Window" :category :window
@@ -461,7 +489,8 @@
 
 (deftest rejects-family-formula-and-nesting-cycles
   (let [formula-cycle (integration/family-definition
-                       {:id "cycle" :parameters {}
+                       {:id "cycle" :parameters {:a {:type :number :default 1}
+                                                  :b {:type :number :default 2}}
                         :formulas {:a [:+ [:param :b] 1] :b [:+ [:param :a] 1]}
                         :template {}})
         nested-cycle (integration/family-definition
@@ -471,6 +500,9 @@
     (is (thrown-with-msg? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
                           #"dependency cycle"
                           (integration/resolve-family-parameters formula-cycle {})))
+    (is (thrown-with-msg? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+                          #"formula-driven parameter cannot be overridden"
+                          (integration/resolve-family-parameters formula-cycle {:a 10})))
     (is (thrown-with-msg? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
                           #"nested family cycle"
                           (integration/instantiate-family-type catalog "nested" nil 1 {})))))

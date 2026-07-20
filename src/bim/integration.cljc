@@ -15,6 +15,15 @@
 (defn- pow [value exponent] (#?(:clj Math/pow :cljs js/Math.pow) value exponent))
 (defn- log10 [value] (#?(:clj Math/log10 :cljs js/Math.log10) value))
 (defn- round [value] (#?(:clj Math/round :cljs js/Math.round) value))
+(defn- math-ceil [value] (#?(:clj Math/ceil :cljs js/Math.ceil) value))
+(defn- math-floor [value] (#?(:clj Math/floor :cljs js/Math.floor) value))
+(defn- math-sin [value] (#?(:clj Math/sin :cljs js/Math.sin) value))
+(defn- math-cos [value] (#?(:clj Math/cos :cljs js/Math.cos) value))
+(defn- math-tan [value] (#?(:clj Math/tan :cljs js/Math.tan) value))
+(defn- math-asin [value] (#?(:clj Math/asin :cljs js/Math.asin) value))
+(defn- math-acos [value] (#?(:clj Math/acos :cljs js/Math.acos) value))
+(defn- math-atan [value] (#?(:clj Math/atan :cljs js/Math.atan) value))
+(defn- math-atan2 [y x] (#?(:clj Math/atan2 :cljs js/Math.atan2) y x))
 
 (defn family-definition
   [{:keys [id name category parameters formulas reference-planes sketches constraints
@@ -36,16 +45,29 @@
     (get params (second expression))
 
     (vector? expression)
-    (let [[op & operands] expression
-          values (map #(eval-expr params %) operands)]
+    (let [[op & operands] expression]
       (case op
-        :+ (reduce + values)
-        :- (reduce - values)
-        :* (reduce * values)
-        :/ (reduce / values)
-        :min (reduce min values)
-        :max (reduce max values)
-        (throw (ex-info "unsupported family expression" {:expression expression}))))
+        :if (eval-expr params (if (eval-expr params (first operands))
+                                (second operands) (nth operands 2)))
+        :and (every? true? (map #(boolean (eval-expr params %)) operands))
+        :or (boolean (some #(eval-expr params %) operands))
+        :not (not (eval-expr params (first operands)))
+        (let [values (mapv #(eval-expr params %) operands)]
+          (case op
+            :+ (reduce + values) :- (reduce - values) :* (reduce * values)
+            :/ (reduce / values) :min (reduce min values) :max (reduce max values)
+            :pow (pow (first values) (second values))
+            :sqrt (sqrt (first values)) :abs (math-abs (first values))
+            :round (round (first values)) :ceil (math-ceil (first values))
+            :floor (math-floor (first values))
+            :sin (math-sin (first values)) :cos (math-cos (first values))
+            :tan (math-tan (first values)) :asin (math-asin (first values))
+            :acos (math-acos (first values)) :atan (math-atan (first values))
+            :atan2 (math-atan2 (first values) (second values))
+            := (apply = values) :not= (apply not= values)
+            :< (apply < values) :<= (apply <= values)
+            :> (apply > values) :>= (apply >= values)
+            (throw (ex-info "unsupported family expression" {:expression expression}))))))
 
     :else expression))
 
@@ -278,7 +300,12 @@
   ([family type-key overrides enforce-scopes?]
    (let [specs (:family/parameters family)
          type-spec (get-in family [:family/types type-key])
-         type-overrides (or (:parameters type-spec) {})]
+         type-overrides (or (:parameters type-spec) {})
+         formula-names (set (keys (:family/formulas family)))]
+     (when-let [formula-override
+                (first (filter formula-names (concat (keys type-overrides) (keys overrides))))]
+       (throw (ex-info "formula-driven parameter cannot be overridden"
+                       {:parameter formula-override :type type-key})))
      (when enforce-scopes?
        (doseq [name (keys type-overrides)]
          (when (= :instance (get-in specs [name :scope]))
@@ -286,8 +313,10 @@
        (doseq [name (keys overrides)]
          (when (= :type (get-in specs [name :scope]))
            (throw (ex-info "instance cannot override type parameter" {:parameter name :type type-key})))))
-     (let [initial (merge (into {} (map (fn [[k spec]] [k (:default spec)]) specs))
-                          type-overrides overrides)
+     (let [initial (apply dissoc
+                          (merge (into {} (map (fn [[k spec]] [k (:default spec)]) specs))
+                                 type-overrides overrides)
+                          formula-names)
            params
            (loop [params initial pending (:family/formulas family)]
              (if (empty? pending)
@@ -335,7 +364,12 @@
                                       (get-in planes [(second %) :offset])
                                       (and (vector? %) (= :sketch-profile (first %)))
                                       (get sketches (second %))
-                                      (and (vector? %) (contains? #{:+ :- :* :/ :min :max}
+                                      (and (vector? %) (contains? #{:+ :- :* :/ :min :max
+                                                                   :pow :sqrt :abs :round
+                                                                   :ceil :floor :sin :cos :tan
+                                                                   :asin :acos :atan :atan2
+                                                                   := :not= :< :<= :> :>=
+                                                                   :if :and :or :not}
                                                                   (first %)))
                                       (eval-expr {} %)
                                       :else %)
