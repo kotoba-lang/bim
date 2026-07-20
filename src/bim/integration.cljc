@@ -2450,6 +2450,49 @@
            :structural.load-case/base-shear-n base-shear
            :structural.load-case/seismic-weight-n total-weight)))
 
+(defn structural-result-overlay
+  "Create render-neutral original/deformed member paths and utilization colors
+  linked back to authored BIM elements."
+  ([model analysis] (structural-result-overlay model analysis {}))
+  ([model analysis {:keys [deformation-scale]
+                    :or {deformation-scale 1.0}}]
+   (let [nodes (into {} (map (juxt :structural.node/id identity)
+                             (:structural/nodes model)))
+         displacements (:structural.analysis/displacements analysis)
+         checks (:structural.analysis/member-checks analysis)
+         member-results (:structural.analysis/member-results analysis)
+         displaced (fn [node-id]
+                     (let [point (:structural.node/point (nodes node-id))
+                           displacement (get displacements node-id
+                                             (vec (repeat (count point) 0.0)))]
+                       (mapv + point (mapv #(* deformation-scale %) displacement))))]
+     {:structural.overlay/deformation-scale deformation-scale
+      :structural.overlay/combination (:structural.analysis/combination analysis)
+      :structural.overlay/members
+      (mapv (fn [member]
+              (let [id (:structural.member/id member)
+                    utilization (get-in checks [id :utilization])
+                    color (cond (nil? utilization) [0.23 0.51 0.96 1.0]
+                                (> utilization 1.0) [0.86 0.15 0.15 1.0]
+                                (> utilization 0.9) [0.96 0.62 0.04 1.0]
+                                :else [0.13 0.68 0.36 1.0])]
+                {:structural.overlay/member-id id
+                 :structural.overlay/source-element-id
+                 (:structural.member/source-element-id member)
+                 :structural.overlay/original-axis
+                 [(:structural.node/point (nodes (:structural.member/start-node member)))
+                  (:structural.node/point (nodes (:structural.member/end-node member)))]
+                 :structural.overlay/deformed-axis
+                 [(displaced (:structural.member/start-node member))
+                  (displaced (:structural.member/end-node member))]
+                 :structural.overlay/force-n (or (get-in member-results [id :force-n])
+                                                 (get-in analysis
+                                                         [:structural.analysis/member-axial-forces id]))
+                 :structural.overlay/utilization utilization
+                 :structural.overlay/passes? (get-in checks [id :passes?])
+                 :structural.overlay/color color}))
+            (:structural/members model))})))
+
 (defn mep-system [{:keys [id name kind medium design-flow segments]}]
   {:mep/id id :mep/name name :mep/kind kind :mep/medium medium
    :mep/design-flow design-flow :mep/segments (vec segments)})

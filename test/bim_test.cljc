@@ -848,6 +848,30 @@
                (reduce + (map :fx (:structural.load-case/nodal-loads seismic)))))
            1.0e-9))))
 
+(deftest structural-results-produce-deformed-utilization-overlay
+  (let [model (integration/structural-model
+               {:nodes [(integration/structural-node
+                         {:id :a :point [0 0 0] :restraints [true true true]})
+                        (integration/structural-node
+                         {:id :b :point [4 0 0] :restraints [false true true]})]
+                :members [(assoc (integration/structural-analysis-member
+                                  {:id :m :start-node :a :end-node :b :area-m2 0.01
+                                   :elastic-modulus-pa 2.0e11 :yield-strength-pa 2.5e8})
+                                 :structural.member/source-element-id 500)]})
+        analysis {:structural.analysis/combination :uls
+                  :structural.analysis/displacements {:a [0 0 0] :b [0.002 0 0]}
+                  :structural.analysis/member-results {:m {:force-n 2.0e6}}
+                  :structural.analysis/member-checks
+                  {:m {:utilization 0.95 :passes? true}}}
+        overlay (integration/structural-result-overlay
+                 model analysis {:deformation-scale 100})
+        member (first (:structural.overlay/members overlay))]
+    (is (= [[0 0 0] [4.2 0 0]] (:structural.overlay/deformed-axis member)))
+    (is (= [0.96 0.62 0.04 1.0] (:structural.overlay/color member)))
+    (is (= 500 (:structural.overlay/source-element-id member)))
+    (is (= 2.0e6 (:structural.overlay/force-n member)))
+    (is (= :uls (:structural.overlay/combination overlay)))))
+
 (deftest solves-linear-structural-truss-analysis
   (let [model (integration/structural-model
                {:nodes [(integration/structural-node
