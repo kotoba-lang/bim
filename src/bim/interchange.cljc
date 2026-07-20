@@ -1,6 +1,7 @@
 (ns bim.interchange
   "BIM drawing export through shared kotoba-lang DXF and ISO PDF libraries."
-  (:require [dxf.core :as dxf]
+  (:require [clojure.string :as string]
+            [dxf.core :as dxf]
             [bim.drawing :as drawing]
             [pdf.core :as pdf]))
 
@@ -90,21 +91,98 @@
                                  :text (str (:id element))}))
             (mapcat #(annotation-pdf-commands % point) annotations)))))
 
+(defn- paper-bounds
+  [print-setting options]
+  (let [mm->points #(* % (/ 72.0 25.4))
+        paper (get drawing/sheet-sizes-mm
+                   (:print-setting/paper-size print-setting) [297 210])
+        portrait? (= :portrait (:print-setting/orientation print-setting))
+        [paper-width paper-height]
+        (if portrait? [(min (first paper) (second paper))
+                       (max (first paper) (second paper))]
+            [(max (first paper) (second paper))
+             (min (first paper) (second paper))])]
+    [(or (:width options) (mm->points paper-width))
+     (or (:height options) (mm->points paper-height))]))
+
+(defn- semantic-sheet-content
+  [sheet drawing-set {:keys [storeys annotations-by-storey] :as options} width height]
+  (let [views (into {} (map (juxt :view/id identity) (:drawing/views drawing-set)))
+        schedules (into {} (map (juxt :schedule/id identity) (:drawing/schedules drawing-set)))
+        storeys (into {} (map (juxt :id identity) storeys))
+        view-ids (vec (or (:sheet/views sheet) (map :viewport/view-id (:sheet/viewports sheet))))
+        title-block (:sheet/title-block sheet)
+        revision (or (:revision (last (:sheet/revisions sheet))) "-")
+        line-height 13
+        heading (concat
+                 [(pdf/text-command {:x 30 :y (- height 24) :size 15
+                                     :text (str (:sheet/number sheet) "  " (:sheet/name sheet))})
+                  (pdf/text-command {:x 30 :y 20 :size 8
+                                     :text (str (or (:title-block/organization title-block) "")
+                                                " | " (or (:title-block/project title-block) "")
+                                                " | Revision " revision)})]
+                 (map-indexed
+                  (fn [index view-id]
+                    (let [view (views view-id) schedule (schedules view-id)]
+                      (pdf/text-command
+                       {:x 30 :y (- height 48 (* index line-height)) :size 10
+                        :text (str (inc index) ". "
+                                   (or (:view/name view) (:schedule/name schedule) view-id)
+                                   (when view (str " [" (name (:view/kind view)) "]")))})))
+                  view-ids))
+        plan-content
+        (for [view-id view-ids
+              :let [view (views view-id) storey (storeys (:view/storey-id view))]
+              :when (and (= :floor-plan (:view/kind view)) storey)]
+          (floor-plan-pdf-content
+           storey (assoc options :page-height height :scale (or (:scale options) 20.0)
+                         :margin 180.0
+                         :annotations (get annotations-by-storey (:id storey)))))
+        schedule-content
+        (for [schedule-id view-ids
+              :let [schedule (schedules schedule-id)]
+              :when schedule]
+          (apply str
+                 (map-indexed
+                  (fn [index row]
+                    (pdf/text-command
+                     {:x (- width 210) :y (- height 48 (* index 11)) :size 7
+                      :text (str (inc index) "  "
+                                 (string/join " | "
+                                              (map #(get row (:key %))
+                                                   (:schedule/fields schedule))))}))
+                  (:schedule/rows schedule))))]
+    (apply str (concat heading plan-content schedule-content))))
+
+(defn semantic-drawing-set-pdf
+  "Publish one PDF page per semantic sheet. Sheet order, paper settings, view
+  references, title-block metadata, schedules, and available floor-plan geometry
+  are preserved in the issued document."
+  ([drawing-set storeys] (semantic-drawing-set-pdf drawing-set storeys {}))
+  ([drawing-set storeys options]
+   (when-not (seq (:drawing/sheets drawing-set))
+     (throw (ex-info "drawing set requires at least one sheet" {})))
+   (pdf/write-document
+    (mapv (fn [sheet]
+            (let [print-setting (merge {:print-setting/paper-size (or (:sheet/size sheet) :a4)
+                                        :print-setting/orientation :landscape}
+                                       (:print-setting options)
+                                       (:sheet/print-setting sheet))
+                  [width height] (paper-bounds print-setting options)]
+              {:width width :height height
+               :content (semantic-sheet-content sheet drawing-set
+                                                (assoc options :storeys storeys)
+                                                width height)}))
+          (:drawing/sheets drawing-set)))))
+
 (defn drawing-set-pdf
   "Export one vector PDF page per storey, suitable for archival or issue."
   ([storeys] (drawing-set-pdf storeys {}))
-  ([storeys {:keys [width height annotations-by-storey print-setting] :as options}]
-   (let [mm->points #(* % (/ 72.0 25.4))
-         paper (get drawing/sheet-sizes-mm
-                    (:print-setting/paper-size print-setting) [297 210])
-         portrait? (= :portrait (:print-setting/orientation print-setting))
-         [paper-width paper-height]
-         (if portrait? [(min (first paper) (second paper))
-                        (max (first paper) (second paper))]
-             [(max (first paper) (second paper))
-              (min (first paper) (second paper))])
-         width (or width (mm->points paper-width))
-         height (or height (mm->points paper-height))
+  ([storeys {:keys [annotations-by-storey print-setting drawing-set] :as options}]
+   (if drawing-set
+     (semantic-drawing-set-pdf drawing-set storeys options)
+     (let [[width height] (paper-bounds print-setting options)
+         mm->points #(* % (/ 72.0 25.4))
          denominator (:print-setting/scale print-setting)
          scale (if (number? denominator) (/ (mm->points 1000.0) denominator)
                    (or (:scale options) 40.0))
@@ -118,4 +196,4 @@
                          storey (assoc options :page-height height :scale scale :margin margin
                                        :annotations
                                        (get annotations-by-storey (:id storey))))})
-            storeys)))))
+            storeys))))))
