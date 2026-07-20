@@ -944,6 +944,74 @@
    :view/discipline (or discipline :architectural)
    :view/template-id template-id :view/overrides (or overrides {})})
 
+(defn- drawing-point? [point]
+  (and (vector? point) (= 2 (count point)) (every? number? point)))
+
+(defn drawing-annotation
+  "Create a persistent, editable drawing annotation. Model references are kept
+  as semantic element/anchor pairs so dimensions and tags can be reassociated."
+  [{:keys [id kind from to point points text label value offset references
+           revision style] :as annotation}]
+  (when-not (and (some? id) (keyword? kind))
+    (throw (ex-info "drawing annotation requires id and kind"
+                    {:id id :kind kind})))
+  (case kind
+    :dimension
+    (when-not (and (drawing-point? from) (drawing-point? to))
+      (throw (ex-info "dimension requires 2D from and to points" {:id id})))
+
+    (:tag :text :level)
+    (when-not (and (drawing-point? point)
+                   (or (not (contains? #{:tag :text} kind)) (string? text)))
+      (throw (ex-info "annotation requires a 2D point and text" {:id id :kind kind})))
+
+    :leader
+    (when-not (and (<= 2 (count points)) (every? drawing-point? points) (string? text))
+      (throw (ex-info "leader requires text and at least two 2D points" {:id id})))
+
+    :revision-cloud
+    (when-not (and (<= 3 (count points)) (every? drawing-point? points) revision)
+      (throw (ex-info "revision cloud requires revision and at least three 2D points"
+                      {:id id})))
+
+    :callout
+    (when-not (and (= 2 (count (:bounds annotation)))
+                   (every? drawing-point? (:bounds annotation)))
+      (throw (ex-info "callout requires 2D bounds" {:id id})))
+
+    (throw (ex-info "unsupported drawing annotation kind" {:id id :kind kind})))
+  (cond-> (assoc annotation :annotation/id id :annotation/kind kind
+                            :kind kind :references (vec references)
+                            :style (or style {}))
+    (and (= :dimension kind) (nil? value))
+    (assoc :value (let [[x1 y1] from [x2 y2] to]
+                    (#?(:clj Math/sqrt :cljs js/Math.sqrt)
+                     (+ (* (- x2 x1) (- x2 x1)) (* (- y2 y1) (- y2 y1))))))
+    (and (= :dimension kind) (nil? offset)) (assoc :offset 18)
+    label (assoc :label label)))
+
+(defn add-view-annotation [view annotation]
+  (let [annotation (drawing-annotation annotation)]
+    (when (some #(= (:annotation/id annotation) (:annotation/id %))
+                (:view/annotations view))
+      (throw (ex-info "duplicate drawing annotation id"
+                      {:id (:annotation/id annotation) :view-id (:view/id view)})))
+    (update view :view/annotations (fnil conj []) annotation)))
+
+(defn update-view-annotation [view annotation-id changes]
+  (let [index (first (keep-indexed #(when (= annotation-id (:annotation/id %2)) %1)
+                                   (:view/annotations view)))]
+    (when (nil? index)
+      (throw (ex-info "drawing annotation not found"
+                      {:id annotation-id :view-id (:view/id view)})))
+    (update-in view [:view/annotations index]
+               #(drawing-annotation (merge % changes {:id annotation-id})))))
+
+(defn remove-view-annotation [view annotation-id]
+  (update view :view/annotations
+          #(into [] (remove (fn [annotation]
+                              (= annotation-id (:annotation/id annotation)))) %)))
+
 (defn apply-view-template
   "Resolve a drawing view and template into renderer options. View overrides
   win without mutating the shared template."
