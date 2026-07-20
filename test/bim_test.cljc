@@ -1564,6 +1564,37 @@
     (is (< (count (re-seq #"data-element-id=" hidden))
            (count (re-seq #"data-element-id=" wire))))))
 
+(deftest plan-view-range-and-sheet-print-settings
+  (let [lower (bim/wall {:id 240 :name "Lower" :start [0 0 0] :end [4 0 0]
+                         :height 3})
+        upper (bim/wall {:id 241 :name "Upper" :start [0 2 4] :end [4 2 4]
+                         :height 3})
+        storey (bim/storey {:id 34 :name "Range" :elevation 0 :height 8
+                            :placement :identity :spaces [] :elements [lower upper]})
+        range (integration/view-range {:top 3.5 :cut-plane 1.2 :bottom 0 :view-depth -1})
+        template (integration/view-template {:id :plan :name "Plan" :view-range range})
+        view (integration/drawing-view {:id :level-1 :kind :floor-plan :template-id :plan})
+        svg (drawing/documented-floor-plan-svg
+             storey (integration/apply-view-template view template))
+        print-setting (integration/print-setting
+                       {:id :a3-portrait :name "A3 portrait" :paper-size :a3
+                        :orientation :portrait :scale 100 :color-mode :grayscale
+                        :margins-mm [5 5 5 5]})
+        sheet (integration/assign-sheet-print-setting
+               (integration/drawing-sheet {:id :a101 :number "A-101"}) print-setting)
+        sheet-svg (drawing/drawing-sheet-svg
+                   {:number "A-101" :size :a1 :print-setting print-setting})]
+    (is (= range (:view-range (integration/apply-view-template view template))))
+    (is (re-find #"W240" svg))
+    (is (not (re-find #"W241" svg)))
+    (is (re-find #"class=\"cut-element\"" svg))
+    (is (= :a3-portrait (:sheet/print-setting-id sheet)))
+    (is (re-find #"viewBox=\"0 0 297 420\"" sheet-svg))
+    (is (re-find #"data-paper-size=\"a3\"" sheet-svg))
+    (is (thrown? #?(:clj Exception :cljs js/Error)
+                 (integration/view-range
+                  {:top 1 :cut-plane 2 :bottom 0 :view-depth -1})))))
+
 (deftest persistent-drawing-annotations-support-editing-and-rendering
   (let [wall (bim/wall {:id 250 :start [0 0 0] :end [6 0 0] :height 3.0})
         storey (bim/storey {:id 35 :name "Annotations" :elevation 0 :height 3

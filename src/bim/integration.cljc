@@ -920,8 +920,17 @@
                          :void/id (:id void)})
                       geometry (:voids instance))))))
 
+(defn view-range
+  "Validate a Revit-style plan view range in model elevation coordinates."
+  [{:keys [top cut-plane bottom view-depth] :as range}]
+  (when-not (and (every? number? [top cut-plane bottom view-depth])
+                 (>= top cut-plane bottom view-depth))
+    (throw (ex-info "view range requires top >= cut-plane >= bottom >= view-depth"
+                    {:view-range range})))
+  {:top top :cut-plane cut-plane :bottom bottom :view-depth view-depth})
+
 (defn view-template
-  [{:keys [id name discipline scale detail-level hidden-line? show-tags?
+  [{:keys [id name discipline scale detail-level hidden-line? show-tags? view-range
            category-visibility category-overrides annotation-style]}]
   {:view-template/id id :view-template/name name
    :view-template/discipline (or discipline :architectural)
@@ -929,17 +938,19 @@
    :view-template/detail-level (or detail-level :medium)
    :view-template/hidden-line? (if (nil? hidden-line?) true hidden-line?)
    :view-template/show-tags? (if (nil? show-tags?) true show-tags?)
+   :view-template/view-range (when view-range (bim.integration/view-range view-range))
    :view-template/category-visibility (or category-visibility {})
    :view-template/category-overrides (or category-overrides {})
    :view-template/annotation-style (or annotation-style {})})
 
 (defn drawing-view
   [{:keys [id kind name scale storey-id building-id section-box cut-plane direction
-           discipline annotations template-id overrides]}]
+           discipline annotations template-id overrides view-range]}]
   {:view/id id :view/kind kind :view/name name :view/scale (or scale 100)
    :view/scale-explicit? (some? scale)
    :view/storey-id storey-id :view/building-id building-id
    :view/section-box section-box :view/cut-plane cut-plane :view/direction direction
+   :view/view-range (when view-range (bim.integration/view-range view-range))
    :view/annotations (vec annotations)
    :view/discipline (or discipline :architectural)
    :view/template-id template-id :view/overrides (or overrides {})})
@@ -1071,6 +1082,7 @@
           :detail-level (:view-template/detail-level template)
           :hidden-line? (:view-template/hidden-line? template)
           :show-tags? (:view-template/show-tags? template)
+          :view-range (or (:view/view-range view) (:view-template/view-range template))
           :category-visibility (:view-template/category-visibility template)
           :category-overrides (:view-template/category-overrides template)
           :annotation-style (:view-template/annotation-style template)
@@ -1081,6 +1093,37 @@
 (defn drawing-sheet [{:keys [id number name size views revisions]}]
   {:sheet/id id :sheet/number number :sheet/name name :sheet/size (or size :a1)
    :sheet/views (vec views) :sheet/revisions (vec revisions)})
+
+(def print-paper-sizes #{:a0 :a1 :a2 :a3 :a4 :letter :legal :tabloid})
+
+(defn print-setting
+  "Create a deterministic sheet print contract shared by PDF and physical
+  print adapters. Scale may be :fit or a positive drawing denominator."
+  [{:keys [id name paper-size orientation scale color-mode raster-quality
+           margins-mm copies]}]
+  (let [paper-size (or paper-size :a1)
+        orientation (or orientation :landscape)
+        scale (or scale :fit)
+        raster-quality (or raster-quality :high)
+        margins-mm (or margins-mm [5 5 5 5])]
+    (when-not (contains? print-paper-sizes paper-size)
+      (throw (ex-info "unsupported print paper size" {:paper-size paper-size})))
+    (when-not (contains? #{:portrait :landscape} orientation)
+      (throw (ex-info "unsupported print orientation" {:orientation orientation})))
+    (when-not (or (= :fit scale) (and (number? scale) (pos? scale)))
+      (throw (ex-info "print scale must be :fit or a positive denominator" {:scale scale})))
+    (when-not (and (= 4 (count margins-mm)) (every? #(and (number? %) (<= 0 %)) margins-mm))
+      (throw (ex-info "print margins require four non-negative millimetre values"
+                      {:margins-mm margins-mm})))
+    {:print-setting/id id :print-setting/name (or name (str id))
+     :print-setting/paper-size paper-size :print-setting/orientation orientation
+     :print-setting/scale scale :print-setting/color-mode (or color-mode :color)
+     :print-setting/raster-quality raster-quality :print-setting/margins-mm margins-mm
+     :print-setting/copies (or copies 1)}))
+
+(defn assign-sheet-print-setting [sheet setting]
+  (assoc sheet :sheet/print-setting-id (:print-setting/id setting)
+               :sheet/print-setting setting))
 
 (defn element-schedule
   "Create a deterministic quantity schedule grouped by selected element fields."
