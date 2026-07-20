@@ -1425,3 +1425,29 @@
     (is (re-find #"#ff0000" plan-svg))
     (is (< (count (re-seq #"data-element-id=" hidden))
            (count (re-seq #"data-element-id=" wire))))))
+
+(deftest detail-callouts-link-cropped-model-views
+  (let [wall (bim/wall {:id 301 :start [0 0 0] :end [6 0 0] :height 3.0})
+        storey (bim/storey {:id 40 :name "Callout Plan" :elevation 0 :height 3
+                            :placement :identity :spaces [] :elements [wall]})
+        building (bim/building {:id 41 :name "Callout Building" :placement :identity
+                                :reference-elevation 0 :storeys [storey]})
+        plan-svg (drawing/documented-floor-plan-svg
+                  storey {:annotations [{:kind :callout :bounds [[1.0 -0.5] [3.0 0.5]]
+                                         :label "1/A-501" :target-view-id "wall-detail"}]})
+        detail-svg (drawing/detail-view-svg
+                    building {:id "wall-detail" :parent-view-id "section-a"
+                              :source-kind :section :axis :x :cut-position 0.0
+                              :depth 1.0 :crop [[1.0 0.0] [3.0 3.0]]
+                              :scale 100 :title "Wall Detail"})]
+    (is (re-find #"class=\"detail-callout\"" plan-svg))
+    (is (re-find #"data-target-view=\"wall-detail\"" plan-svg))
+    (is (re-find #"1/A-501" plan-svg))
+    (is (re-find #"data-view-kind=\"detail\"" detail-svg))
+    (is (re-find #"data-view-id=\"wall-detail\"" detail-svg))
+    (is (re-find #"data-parent-view-id=\"section-a\"" detail-svg))
+    (is (re-find #"class=\"cut-element\"" detail-svg))
+    (is (thrown-with-msg?
+         #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+         #"detail view requires"
+         (drawing/detail-view building {:id "invalid" :crop [[0 0] [1 1]]})))))
