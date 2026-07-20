@@ -432,22 +432,140 @@
       (throw (ex-info "unsupported family constraint" {:constraint constraint}))))
   {:parameters params :reference-planes planes})
 
+(defn- assign-sketch-coordinate [points point-name axis value sketch-name constraint]
+  (if-not (number? value)
+    points
+    (let [existing (get-in points [point-name axis])
+          tolerance (or (:tolerance constraint) 1.0e-9)]
+      (when-not (contains? points point-name)
+        (throw (ex-info "family sketch constraint references an unknown point"
+                        {:sketch sketch-name :point point-name :constraint constraint})))
+      (when (and (number? existing) (> (math-abs (- existing value)) tolerance))
+        (throw (ex-info "family sketch constraints are inconsistent"
+                        {:sketch sketch-name :point point-name :axis axis
+                         :existing existing :candidate value :constraint constraint})))
+      (assoc-in points [point-name axis] value))))
+
+(defn- solve-family-sketch-points [sketch-name sketch params planes]
+  (let [initial
+        (into {}
+              (map (fn [[point-name coordinates]]
+                     (when-not (= 2 (count coordinates))
+                       (throw (ex-info "family sketch point must have two coordinates"
+                                       {:sketch sketch-name :point point-name
+                                        :coordinates coordinates})))
+                     (let [point (mapv #(when (some? %)
+                                         (eval-layout-expression params planes %))
+                                       coordinates)]
+                       (when-not (every? #(or (nil? %) (number? %)) point)
+                         (throw (ex-info "family sketch coordinate must be numeric or constrained"
+                                         {:sketch sketch-name :point point-name
+                                          :coordinates point})))
+                       [point-name point])))
+              (:points sketch))
+        assign (fn [points point-name axis value constraint]
+                 (assign-sketch-coordinate points point-name axis value
+                                           sketch-name constraint))]
+    (loop [points initial]
+      (if (every? number? (mapcat identity (vals points)))
+        points
+        (let [next-points
+              (reduce
+               (fn [result constraint]
+                 (let [from (:from constraint) to (:to constraint)
+                       a (get result from) b (get result to)
+                       direction (or (:direction constraint) 1.0)]
+                   (case (:kind constraint)
+                     :fixed
+                     (let [value (mapv #(eval-layout-expression params planes %)
+                                       (:value constraint))]
+                       (-> result
+                           (assign (:point constraint) 0 (first value) constraint)
+                           (assign (:point constraint) 1 (second value) constraint)))
+
+                     :horizontal
+                     (-> result
+                         (assign to 1 (second a) constraint)
+                         (assign from 1 (second b) constraint))
+
+                     :vertical
+                     (-> result
+                         (assign to 0 (first a) constraint)
+                         (assign from 0 (first b) constraint))
+
+                     :coincident
+                     (reduce (fn [coordinates axis]
+                               (-> coordinates
+                                   (assign to axis (get a axis) constraint)
+                                   (assign from axis (get b axis) constraint)))
+                             result [0 1])
+
+                     :midpoint
+                     (let [left (get result (:left constraint))
+                           right (get result (:right constraint))]
+                       (reduce (fn [coordinates axis]
+                                 (if (and (number? (get left axis))
+                                          (number? (get right axis)))
+                                   (assign coordinates (:target constraint) axis
+                                           (/ (+ (get left axis) (get right axis)) 2.0)
+                                           constraint)
+                                   coordinates))
+                               result [0 1]))
+
+                     :distance
+                     (let [distance (eval-layout-expression params planes (:value constraint))
+                           axis (case (:axis constraint) :x 0 :y 1 nil)
+                           solve-from
+                           (fn [coordinates source target sign]
+                             (let [source-point (get coordinates source)
+                                   target-point (get coordinates target)]
+                               (cond
+                                 (and axis (every? number? source-point))
+                                 (-> coordinates
+                                     (assign target (if (zero? axis) 1 0)
+                                             (get source-point (if (zero? axis) 1 0)) constraint)
+                                     (assign target axis
+                                             (+ (get source-point axis)
+                                                (* sign direction distance)) constraint))
+
+                                 (and (every? number? source-point)
+                                      (number? (second target-point))
+                                      (= (second source-point) (second target-point)))
+                                 (assign coordinates target 0
+                                         (+ (first source-point) (* sign direction distance))
+                                         constraint)
+
+                                 (and (every? number? source-point)
+                                      (number? (first target-point))
+                                      (= (first source-point) (first target-point)))
+                                 (assign coordinates target 1
+                                         (+ (second source-point) (* sign direction distance))
+                                         constraint)
+
+                                 :else coordinates)))]
+                       (when-not (and (number? distance) (not (neg? distance)))
+                         (throw (ex-info "family sketch distance must be non-negative"
+                                         {:sketch sketch-name :constraint constraint
+                                          :distance distance})))
+                       (-> result
+                           (solve-from from to 1.0)
+                           (solve-from to from -1.0)))
+
+                     result)))
+               points (:constraints sketch))]
+          (when (= points next-points)
+            (throw (ex-info "family sketch is under-constrained"
+                            {:sketch sketch-name
+                             :unresolved (into {} (filter (fn [[_ point]]
+                                                           (some nil? point))) points)})))
+          (recur next-points))))))
+
 (defn resolve-family-sketches
   "Resolve parameterized 2D point loops into closed IFC-compatible profiles."
   [family params planes]
   (into {}
         (map (fn [[sketch-name sketch]]
-               (let [points
-                     (into {}
-                           (map (fn [[point-name coordinates]]
-                                  (let [point (mapv #(eval-layout-expression params planes %)
-                                                    coordinates)]
-                                    (when-not (and (= 2 (count point)) (every? number? point))
-                                      (throw (ex-info "family sketch point must resolve to 2D numbers"
-                                                      {:sketch sketch-name :point point-name
-                                                       :coordinates point})))
-                                    [point-name point])))
-                           (:points sketch))
+               (let [points (solve-family-sketch-points sketch-name sketch params planes)
                      loop-names (vec (:loop sketch))
                      loop-points (mapv points loop-names)]
                  (when (or (< (count loop-names) 3) (some nil? loop-points)
@@ -465,6 +583,12 @@
                          failed! #(throw (ex-info % {:sketch sketch-name
                                                      :constraint constraint}))]
                      (case (:kind constraint)
+                       :fixed
+                       (let [expected (mapv #(eval-layout-expression params planes %)
+                                            (:value constraint))]
+                         (when (some #(> (math-abs %1) tolerance)
+                                     (map - (point (:point constraint)) expected))
+                           (failed! "family sketch fixed constraint failed")))
                        :horizontal
                        (when (> (math-abs (- (second a) (second b))) tolerance)
                          (failed! "family sketch horizontal constraint failed"))
@@ -474,6 +598,14 @@
                        :coincident
                        (when (> (length [(:from constraint) (:to constraint)]) tolerance)
                          (failed! "family sketch coincident constraint failed"))
+                       :midpoint
+                       (let [left (point (:left constraint))
+                             right (point (:right constraint))
+                             expected (mapv #(/ (+ %1 %2) 2.0) left right)
+                             actual (point (:target constraint))]
+                         (when (some #(> (math-abs %) tolerance)
+                                     (map - actual expected))
+                           (failed! "family sketch midpoint constraint failed")))
                        :distance
                        (let [actual (length [(:from constraint) (:to constraint)])
                              expected (eval-layout-expression params planes (:value constraint))]

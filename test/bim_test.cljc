@@ -565,6 +565,49 @@
                            family 102 {} (bim/element {:id 200 :kind :slab})
                            {:face :exterior})))))
 
+(deftest sketch-constraints-solve-unresolved-profile-points
+  (let [family (integration/family-definition
+                {:id "constrained-panel" :name "Constrained Panel"
+                 :category :generic-model
+                 :parameters {:width {:type :length :default 4.0}
+                              :height {:type :length :default 2.0}}
+                 :sketches
+                 {:profile
+                  {:points {:a [nil nil] :b [nil nil] :c [nil nil]
+                            :d [nil nil] :center [nil nil]}
+                   :loop [:a :b :c :d]
+                   :constraints
+                   [{:kind :fixed :point :a :value [0.0 0.0]}
+                    {:kind :horizontal :from :a :to :b}
+                    {:kind :distance :from :a :to :b :axis :x
+                     :value [:param :width]}
+                    {:kind :vertical :from :b :to :c}
+                    {:kind :distance :from :b :to :c :axis :y
+                     :value [:param :height]}
+                    {:kind :horizontal :from :c :to :d}
+                    {:kind :vertical :from :d :to :a}
+                    {:kind :midpoint :left :a :right :c :target :center}]}}
+                 :template {:kind :proxy :name "Constrained Panel"
+                            :geometry {:kind :extruded-area-solid
+                                       :profile [:sketch-profile :profile]
+                                       :direction [0 0 1] :depth 0.2}}})
+        instance (integration/instantiate-family family 83 {:width 6.0 :height 3.0})]
+    (is (= [[0.0 0.0] [6.0 0.0] [6.0 3.0] [0.0 3.0] [0.0 0.0]]
+           (get-in instance [:geometry :profile :points])))
+    (is (thrown-with-msg?
+         #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+         #"inconsistent"
+         (integration/instantiate-family
+          (assoc-in family [:family/sketches :profile :points :b] [1.0 nil])
+          84 {:width 6.0 :height 3.0})))
+    (is (thrown-with-msg?
+         #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+         #"under-constrained"
+         (integration/instantiate-family
+          (update-in family [:family/sketches :profile :constraints]
+                     #(vec (remove (fn [constraint] (= :fixed (:kind constraint))) %)))
+          85 {:width 6.0 :height 3.0})))))
+
 (deftest adaptive-family-points-drive-freeform-path
   (let [family (integration/family-definition
                 {:id "adaptive-rail" :name "Adaptive Rail" :category :railing
