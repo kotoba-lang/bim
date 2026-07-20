@@ -30,3 +30,34 @@
     (is (pos? (:rebar-set/steel-volume-m3 mat)))
     (is (true? (:connection/passes? connection)))
     (is (< (:connection/utilization connection) 1.0))))
+
+(deftest two-dimensional-frame-analysis-includes-bending-and-releases
+  (let [cantilever
+        (structural/analyze-2d-frame
+         {:nodes [{:id :a :point [0.0 0.0] :restraints [true true true]}
+                  {:id :b :point [3.0 0.0] :restraints [false false false]}]
+          :members [{:id :ab :start-node :a :end-node :b :area-m2 0.01
+                     :elastic-modulus-pa 2.0e11 :inertia-m4 8.0e-6}]
+          :load-case {:nodal-loads [{:node :b :fy -1000.0}]}})
+        released
+        (structural/analyze-2d-frame
+         {:nodes [{:id :a :point [0.0 0.0] :restraints [true true false]}
+                  {:id :b :point [6.0 0.0] :restraints [false true false]}]
+          :members [{:id :ab :start-node :a :end-node :b :area-m2 0.01
+                     :elastic-modulus-pa 2.0e11 :inertia-m4 8.0e-6
+                     :release-start-moment? true :release-end-moment? true}]
+          :load-case {:member-loads [{:member :ab :qy -10000.0}]}})]
+    (is (< (#?(:clj Math/abs :cljs js/Math.abs)
+            (- -0.005625 (get-in cantilever [:structural.frame/nodes :b :uy])))
+           1.0e-12))
+    (is (< (#?(:clj Math/abs :cljs js/Math.abs)
+            (- 3000.0 (get-in cantilever [:structural.frame/nodes :a :rmz])))
+           1.0e-9))
+    (is (= -1000.0
+           (get-in cantilever [:structural.frame/members :ab :local-end-forces :v2])))
+    (is (= 30000.0 (get-in released [:structural.frame/nodes :a :ry])))
+    (is (= 30000.0 (get-in released [:structural.frame/nodes :b :ry])))
+    (is (zero? (get-in released
+                       [:structural.frame/members :ab :local-end-forces :m1])))
+    (is (zero? (get-in released
+                       [:structural.frame/members :ab :local-end-forces :m2])))))

@@ -5,6 +5,7 @@
 (def schema-version 1)
 (def ^:private pi #?(:clj Math/PI :cljs js/Math.PI))
 (defn- sqrt [value] (#?(:clj Math/sqrt :cljs js/Math.sqrt) value))
+(defn- math-abs [value] (#?(:clj Math/abs :cljs js/Math.abs) value))
 
 (defn- cross [[ax ay az] [bx by bz]]
   [(- (* ay bz) (* az by)) (- (* az bx) (* ax bz)) (- (* ax by) (* ay bx))])
@@ -98,3 +99,220 @@
      :connection/design-resistance-n resistance
      :connection/utilization utilization :connection/passes? (<= utilization 1.0)
      :connection/governing-mode (if (< shear bearing) :bolt-shear :plate-bearing)}))
+
+(defn- transpose [matrix] (apply mapv vector matrix))
+(defn- matrix-vector [matrix vector]
+  (mapv #(reduce + (map * % vector)) matrix))
+(defn- matrix-multiply [left right]
+  (let [columns (transpose right)]
+    (mapv (fn [row] (mapv #(reduce + (map * row %)) columns)) left)))
+
+(defn- solve-system [matrix values]
+  (let [n (count values)]
+    (loop [column 0 matrix (mapv vec matrix) values (vec values)]
+      (if (= column n)
+        (loop [row (dec n) solution (vec (repeat n 0.0))]
+          (if (neg? row)
+            solution
+            (let [known (reduce + (map (fn [column]
+                                         (* (get-in matrix [row column])
+                                            (nth solution column)))
+                                       (range (inc row) n)))]
+              (recur (dec row)
+                     (assoc solution row
+                            (/ (- (nth values row) known)
+                               (get-in matrix [row row])))))))
+        (let [pivot-row (apply max-key
+                               #(math-abs (double (get-in matrix [% column])))
+                               (range column n))
+              matrix (assoc matrix column (nth matrix pivot-row)
+                            pivot-row (nth matrix column))
+              values (assoc values column (nth values pivot-row)
+                            pivot-row (nth values column))
+              pivot (get-in matrix [column column])]
+          (when (< (math-abs (double pivot)) 1.0e-12)
+            (throw (ex-info "frame stiffness matrix is singular" {:dof column})))
+          (let [[matrix values]
+                (reduce (fn [[m v] row]
+                          (let [factor (/ (get-in m [row column]) pivot)]
+                            [(assoc m row
+                                    (mapv - (nth m row)
+                                          (mapv #(* factor %) (nth m column))))
+                             (assoc v row (- (nth v row) (* factor (nth v column))))]))
+                        [matrix values] (range (inc column) n))]
+            (recur (inc column) matrix values)))))))
+
+(defn- frame-local-stiffness [area elastic-modulus inertia length]
+  (let [axial (/ (* area elastic-modulus) length)
+        bending (/ (* elastic-modulus inertia) (* length length length))
+        a (* 12.0 bending) b (* 6.0 length bending)
+        c (* 4.0 length length bending) d (* 2.0 length length bending)]
+    [[axial 0.0 0.0 (- axial) 0.0 0.0]
+     [0.0 a b 0.0 (- a) b]
+     [0.0 b c 0.0 (- b) d]
+     [(- axial) 0.0 0.0 axial 0.0 0.0]
+     [0.0 (- a) (- b) 0.0 a (- b)]
+     [0.0 b d 0.0 (- b) c]]))
+
+(defn- frame-transform [cosine sine]
+  [[cosine sine 0.0 0.0 0.0 0.0]
+   [(- sine) cosine 0.0 0.0 0.0 0.0]
+   [0.0 0.0 1.0 0.0 0.0 0.0]
+   [0.0 0.0 0.0 cosine sine 0.0]
+   [0.0 0.0 0.0 (- sine) cosine 0.0]
+   [0.0 0.0 0.0 0.0 0.0 1.0]])
+
+(defn- condense-frame-releases [stiffness load releases]
+  (let [released (vec (keep-indexed #(when %2 %1) releases))
+        retained (vec (remove (set released) (range 6)))]
+    (if (empty? released)
+      {:stiffness stiffness :load load}
+      (let [krr (mapv (fn [row] (mapv #(get-in stiffness [row %]) released)) released)
+            released-load (mapv #(nth load %) released)
+            solve-released (fn [values] (solve-system krr values))
+            inverse-columns
+            (mapv (fn [column]
+                    (solve-released
+                     (mapv #(if (= % column) 1.0 0.0) (range (count released)))))
+                  (range (count released)))
+            inverse (transpose inverse-columns)
+            correction-load (matrix-vector inverse released-load)
+            condensed
+            (reduce (fn [result [i j]]
+                      (let [kir (mapv #(get-in stiffness [i %]) released)
+                            krj (mapv #(get-in stiffness [% j]) released)
+                            correction (reduce + (map * kir (matrix-vector inverse krj)))]
+                        (assoc-in result [i j] (- (get-in stiffness [i j]) correction))))
+                    (vec (repeat 6 (vec (repeat 6 0.0))))
+                    (for [i retained j retained] [i j]))
+            condensed-load
+            (reduce (fn [result i]
+                      (let [kir (mapv #(get-in stiffness [i %]) released)]
+                        (assoc result i (- (nth load i)
+                                           (reduce + (map * kir correction-load))))))
+                    (vec (repeat 6 0.0)) retained)]
+        {:stiffness condensed :load condensed-load}))))
+
+(defn analyze-2d-frame
+  "Linear elastic Euler-Bernoulli 2D frame analysis with axial and bending
+  stiffness, three DOFs per node, uniform local member loads, end-moment
+  releases, nodal displacements, reactions, and local member end forces."
+  [{:keys [nodes members load-case]}]
+  (let [node-index (into {} (map-indexed (fn [index node] [(:id node) index]) nodes))
+        node-by-id (into {} (map (juxt :id identity) nodes))
+        member-ids (map :id members)
+        member-id-set (set member-ids)
+        dof-count (* 3 (count nodes))]
+    (when (or (empty? nodes) (not= (count nodes) (count node-index))
+              (not= (count members) (count (distinct member-ids))))
+      (throw (ex-info "frame model requires unique nodes and members" {})))
+    (doseq [{:keys [id point restraints]} nodes]
+      (when-not (and id (= 2 (count point)) (every? number? point)
+                     (= 3 (count restraints)) (every? boolean? restraints))
+        (throw (ex-info "invalid 2D frame node"
+                        {:node id :point point :restraints restraints}))))
+    (doseq [{:keys [id start-node end-node area-m2 elastic-modulus-pa inertia-m4]} members]
+      (when-not (and (node-by-id start-node) (node-by-id end-node)
+                     (not= start-node end-node)
+                     (pos? (or area-m2 0.0)) (pos? (or elastic-modulus-pa 0.0))
+                     (pos? (or inertia-m4 0.0)))
+        (throw (ex-info "invalid 2D frame member" {:member id}))))
+    (doseq [{:keys [node] :as load} (:nodal-loads load-case)]
+      (when-not (contains? node-by-id node)
+        (throw (ex-info "frame nodal load references an unknown node" {:load load}))))
+    (doseq [{:keys [member] :as load} (:member-loads load-case)]
+      (when-not (contains? member-id-set member)
+        (throw (ex-info "frame member load references an unknown member" {:load load}))))
+    (let [member-load-by-id (into {} (map (juxt :member identity)
+                                           (:member-loads load-case)))
+          member-data
+          (mapv
+           (fn [{:keys [id start-node end-node area-m2 elastic-modulus-pa inertia-m4
+                        release-start-moment? release-end-moment?] :as member}]
+             (let [[x1 y1] (:point (node-by-id start-node))
+                   [x2 y2] (:point (node-by-id end-node))
+                   dx (- x2 x1) dy (- y2 y1) length (sqrt (+ (* dx dx) (* dy dy)))
+                   cosine (/ dx length) sine (/ dy length)
+                   transform (frame-transform cosine sine)
+                   local-stiffness (frame-local-stiffness area-m2 elastic-modulus-pa
+                                                           inertia-m4 length)
+                   {:keys [qx qy]} (member-load-by-id id)
+                   local-load [(* (or qx 0.0) length 0.5)
+                               (* (or qy 0.0) length 0.5)
+                               (* (or qy 0.0) length length (/ 1.0 12.0))
+                               (* (or qx 0.0) length 0.5)
+                               (* (or qy 0.0) length 0.5)
+                               (* -1.0 (or qy 0.0) length length (/ 1.0 12.0))]
+                   release-mask [false false release-start-moment? false false
+                                 release-end-moment?]
+                   condensed (condense-frame-releases local-stiffness local-load release-mask)
+                   global-stiffness (matrix-multiply
+                                     (transpose transform)
+                                     (matrix-multiply (:stiffness condensed) transform))
+                   global-load (matrix-vector (transpose transform) (:load condensed))
+                   start (* 3 (node-index start-node)) end (* 3 (node-index end-node))
+                   dofs [start (inc start) (+ start 2) end (inc end) (+ end 2)]]
+               {:member member :length length :transform transform
+                :local-stiffness (:stiffness condensed) :local-load (:load condensed)
+                :global-stiffness global-stiffness :global-load global-load :dofs dofs}))
+           members)
+          stiffness
+          (reduce (fn [matrix {:keys [global-stiffness dofs]}]
+                    (reduce (fn [result [i j]]
+                              (update-in result [(nth dofs i) (nth dofs j)] +
+                                         (get-in global-stiffness [i j])))
+                            matrix (for [i (range 6) j (range 6)] [i j])))
+                  (vec (repeat dof-count (vec (repeat dof-count 0.0)))) member-data)
+          member-loads
+          (reduce (fn [loads {:keys [global-load dofs]}]
+                    (reduce (fn [result index]
+                              (update result (nth dofs index) + (nth global-load index)))
+                            loads (range 6)))
+                  (vec (repeat dof-count 0.0)) member-data)
+          loads
+          (reduce (fn [result {:keys [node fx fy mz]}]
+                    (let [offset (* 3 (node-index node))]
+                      (-> result (update offset + (or fx 0.0))
+                          (update (inc offset) + (or fy 0.0))
+                          (update (+ offset 2) + (or mz 0.0)))))
+                  member-loads (:nodal-loads load-case))
+          fixed (into #{} (mapcat (fn [[index node]]
+                                    (keep-indexed #(when %2 (+ (* 3 index) %1))
+                                                  (:restraints node)))
+                                  (map-indexed vector nodes)))
+          inactive (into #{} (filter (fn [dof]
+                                       (and (every? #(< (math-abs (double %)) 1.0e-12)
+                                                    (nth stiffness dof))
+                                            (< (math-abs (double (nth loads dof))) 1.0e-12)))
+                                     (range dof-count)))
+          free (vec (remove (into fixed inactive) (range dof-count)))
+          reduced (mapv (fn [row] (mapv #(get-in stiffness [row %]) free)) free)
+          solution (solve-system reduced (mapv #(nth loads %) free))
+          displacements (reduce (fn [result [dof value]] (assoc result dof value))
+                                (vec (repeat dof-count 0.0)) (map vector free solution))
+          reactions (mapv - (matrix-vector stiffness displacements) loads)
+          node-results
+          (into {} (map-indexed
+                    (fn [index node]
+                      [(:id node) {:ux (nth displacements (* 3 index))
+                                   :uy (nth displacements (inc (* 3 index)))
+                                   :rz (nth displacements (+ (* 3 index) 2))
+                                   :rx (nth reactions (* 3 index))
+                                   :ry (nth reactions (inc (* 3 index)))
+                                   :rmz (nth reactions (+ (* 3 index) 2))}]) nodes))
+          member-results
+          (into {}
+                (map (fn [{:keys [member transform local-stiffness local-load dofs]}]
+                       (let [global-displacements (mapv #(nth displacements %) dofs)
+                             local-displacements (matrix-vector transform global-displacements)
+                             forces (mapv - (matrix-vector local-stiffness local-displacements)
+                                          local-load)]
+                         [(:id member)
+                          {:local-displacements local-displacements
+                           :local-end-forces {:n1 (nth forces 0) :v1 (nth forces 1)
+                                              :m1 (nth forces 2) :n2 (nth forces 3)
+                                              :v2 (nth forces 4) :m2 (nth forces 5)}}]))
+                     member-data))]
+      {:structural.frame/nodes node-results :structural.frame/members member-results
+       :structural.frame/displacements displacements
+       :structural.frame/reactions reactions})))
