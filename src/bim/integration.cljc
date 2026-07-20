@@ -408,6 +408,26 @@
   {:sheet/id id :sheet/number number :sheet/name name :sheet/size (or size :a1)
    :sheet/views (vec views) :sheet/revisions (vec revisions)})
 
+(defn element-schedule
+  "Create a deterministic quantity schedule grouped by selected element fields."
+  [{:keys [id name elements fields] group-fields :group-by}]
+  (let [group-keys (vec (or group-fields [:kind :name]))
+        fields (vec (or fields
+                        [{:key :kind :heading "Category"}
+                         {:key :name :heading "Type / Name"}
+                         {:key :count :heading "Count"}]))
+        rows (->> elements
+                  (group-by #(mapv (fn [key] (get % key)) group-keys))
+                  (map (fn [[values grouped]]
+                         (merge (zipmap group-keys values)
+                                {:count (count grouped)
+                                 :element-ids (mapv :id grouped)})))
+                  (sort-by #(mapv (fn [key] (str (get % key))) group-keys))
+                  vec)]
+    {:schedule/id id :schedule/name name :schedule/fields fields
+     :schedule/group-by group-keys :schedule/rows rows
+     :schedule/total-count (reduce + 0 (map :count rows))}))
+
 (defn- all-storeys [project]
   (mapcat :storeys (mapcat :buildings (:sites project))))
 
@@ -434,12 +454,15 @@
                                   :name (str (:name building) " North Elevation")
                                   :building-id (:id building) :scale 100 :direction :north})])
                 buildings)
-        views (vec (concat plans orthographic))]
+        views (vec (concat plans orthographic))
+        schedules [(element-schedule {:id "schedule-elements" :name "Element Schedule"
+                                      :elements (all-elements project)})]]
     {:drawing/schema-version schema-version
      :drawing/views views
+     :drawing/schedules schedules
      :drawing/sheets [(drawing-sheet {:id "A-001" :number "A-001"
                                       :name "General Arrangements"
-                                      :views (mapv :view/id views)
+                                      :views (conj (mapv :view/id views) "schedule-elements")
                                       :revisions [{:revision "P01" :status :preliminary}]})]}))
 
 (defn- exported-geometry [element]
