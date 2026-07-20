@@ -42,7 +42,7 @@
 
 (defn family-definition
   [{:keys [id name category parameters formulas reference-planes sketches constraints
-           adaptive host types template shared-parameters]}]
+           adaptive host types template shared-parameters shared?]}]
   (let [shared (validate-shared-parameters (or shared-parameters {}))]
     (when-let [parameter (first (filter (set (keys shared)) (keys parameters)))]
       (throw (ex-info "shared and local parameter names conflict"
@@ -52,6 +52,7 @@
      :family/shared-parameters shared :family/formulas (or formulas {})
      :family/reference-planes (or reference-planes {})
      :family/sketches (or sketches {}) :family/adaptive adaptive :family/host host
+     :family/shared? (boolean shared?)
      :family/constraints (vec constraints) :family/types (or types {})
      :family/template template :family/schema-version schema-version}))
 
@@ -223,7 +224,11 @@
   (let [valid-type? (case (:type spec)
                       (:length :angle :area :volume :number :integer) (number? value)
                       :boolean (boolean? value)
-                      (:text :material) (string? value)
+                      :text (string? value)
+                      :material (or (string? value)
+                                    (and (map? value)
+                                         (or (string? (:name value))
+                                             (string? (:id value)))))
                       :enum (contains? (set (:allowed spec)) value)
                       true)]
     (when-not valid-type?
@@ -707,7 +712,7 @@
     (assoc item :id (str (or (:id item) "array-item") "-" index)
                 :family/array-index index)))
 
-(defn- materialize-template [catalog value stack]
+(defn- materialize-template [catalog value stack context]
   (cond
     (and (map? value) (:family/array value))
     (let [{:keys [item] :as array} (:family/array value)
@@ -727,7 +732,7 @@
       (when (and (= :radial kind) (not (number? (:angle array))))
         (throw (ex-info "radial family array requires an angle step" {:array array})))
       (mapv (fn [index]
-              (array-item (materialize-template catalog item stack) array index))
+              (array-item (materialize-template catalog item stack context) array index))
             (range (long array-count))))
 
     (and (map? value) (:family/ref value))
@@ -736,14 +741,42 @@
         (throw (ex-info "nested family cycle" {:family-id family-id :stack stack})))
       (let [family (get-in catalog [:family-catalog/families family-id])]
         (when-not family (throw (ex-info "nested family not found" {:family-id family-id})))
-        (instantiate-family* catalog family (:family/type value) (:id value)
-                             (:overrides value) (conj stack family-id))))
-    (map? value) (into (empty value) (map (fn [[k v]] [k (materialize-template catalog v stack)]) value))
-    (vector? value) (mapv #(materialize-template catalog % stack) value)
-    (seq? value) (map #(materialize-template catalog % stack) value)
+        (cond-> (instantiate-family* catalog family (:family/type value) (:id value)
+                                    (:overrides value) (conj stack family-id) context)
+          (contains? value :shared?) (assoc :family/shared? (boolean (:shared? value))))))
+    (map? value) (into (empty value) (map (fn [[k v]] [k (materialize-template catalog v stack context)]) value))
+    (vector? value) (mapv #(materialize-template catalog % stack context) value)
+    (seq? value) (map #(materialize-template catalog % stack context) value)
     :else value))
 
-(defn- instantiate-family* [catalog family type-key instance-id overrides stack]
+(defn- visible-at-detail? [value detail-level]
+  (let [{:keys [visible? detail-levels]} (:family/visibility value)]
+    (and (not (false? visible?))
+         (or (nil? detail-levels)
+             (contains? (set detail-levels) detail-level)))))
+
+(defn- apply-family-presentation [value context]
+  (let [detail-level (or (:detail-level context) :medium)]
+    (cond
+      (and (map? value) (:family/visibility value)
+           (not (visible-at-detail? value detail-level))) ::hidden
+      (map? value) (into (empty value)
+                         (keep (fn [[k v]]
+                                 (let [presented (apply-family-presentation v context)]
+                                   (when-not (= ::hidden presented) [k presented]))))
+                         value)
+      (vector? value) (into [] (comp (map #(apply-family-presentation % context))
+                                     (remove #(= ::hidden %))) value)
+      (seq? value) (remove #(= ::hidden %)
+                           (map #(apply-family-presentation % context) value))
+      :else value)))
+
+(defn- shared-family-instances [value]
+  (->> (tree-seq coll? seq value)
+       (filter #(and (map? %) (:family/shared? %) (:family/id %)))
+       (mapv #(dissoc % :family/shared-instances))))
+
+(defn- instantiate-family* [catalog family type-key instance-id overrides stack context]
   (let [params (resolve-family-parameters family type-key overrides (some? catalog))
         planes (resolve-reference-planes family params)
         sketches (resolve-family-sketches family params planes)
@@ -752,6 +785,8 @@
                                       (get params (second %))
                                       (and (vector? %) (= :reference (first %)))
                                       (get-in planes [(second %) :offset])
+                                      (and (vector? %) (= :material-param (first %)))
+                                      (get params (second %))
                                       (and (vector? %) (= :sketch-profile (first %)))
                                       (get sketches (second %))
                                       (and (vector? %) (contains? #{:+ :- :* :/ :min :max
@@ -764,11 +799,14 @@
                                       (eval-expr {} %)
                                       :else %)
                                    (:family/template family))
-        body (materialize-template catalog substituted stack)
+        body (-> (materialize-template catalog substituted stack context)
+                 (apply-family-presentation context))
         type-spec (get-in family [:family/types type-key])]
     (cond-> (assoc body :id instance-id
                         :family/id (:family/id family)
                         :family/type type-key
+                        :family/shared? (:family/shared? family)
+                        :family/shared-instances (shared-family-instances body)
                         :family/parameters params
                         :family/reference-planes planes
                         :family/sketches sketches
@@ -783,16 +821,21 @@
 (defn instantiate-family
   "Materialize a serializable family template. A value shaped as [:param :x]
   is replaced by the resolved parameter value."
-  [family instance-id overrides]
-  (instantiate-family* nil family nil instance-id overrides #{(:family/id family)}))
+  ([family instance-id overrides]
+   (instantiate-family family instance-id overrides {}))
+  ([family instance-id overrides context]
+   (instantiate-family* nil family nil instance-id overrides
+                        #{(:family/id family)} context)))
 
 (defn instantiate-family-type
   "Instantiate a named family type from a catalog with instance overrides and
   recursively materialize nested family references."
-  [catalog family-id type-key instance-id overrides]
-  (let [family (get-in catalog [:family-catalog/families family-id])]
-    (when-not family (throw (ex-info "family not found" {:family-id family-id})))
-    (instantiate-family* catalog family type-key instance-id overrides #{family-id})))
+  ([catalog family-id type-key instance-id overrides]
+   (instantiate-family-type catalog family-id type-key instance-id overrides {}))
+  ([catalog family-id type-key instance-id overrides context]
+   (let [family (get-in catalog [:family-catalog/families family-id])]
+     (when-not family (throw (ex-info "family not found" {:family-id family-id})))
+     (instantiate-family* catalog family type-key instance-id overrides #{family-id} context))))
 
 (defn instantiate-adaptive-family
   "Drive an adaptive family template from ordered 3D placement points. Markers
