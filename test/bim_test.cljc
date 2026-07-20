@@ -418,6 +418,9 @@
     (is (= :floor-plan (get-in drawings [:drawing/views 0 :view/kind])))
     (is (= #{:floor-plan :section :elevation}
            (set (map :view/kind (:drawing/views drawings)))))
+    (is (= 1 (get-in drawings [:drawing/schedules 0 :schedule/total-count])))
+    (is (= "schedule-elements"
+           (last (get-in drawings [:drawing/sheets 0 :sheet/views]))))
     (is (= "P01" (get-in drawings [:drawing/sheets 0 :sheet/revisions 0 :revision])))
     (is (= project (integration/import-ifc ifc)))
     (is (= :wall (get-in ifc [:ifc/elements 0 :kind])))
@@ -883,6 +886,10 @@
                                                               :cut-position 0.0 :depth 3.0})
         elevation (drawing/orthographic-view-svg building {:kind :elevation :axis :x
                                                             :cut-position 0.0})
+        schedule (integration/element-schedule
+                  {:id "wall-schedule" :name "Wall Schedule"
+                   :elements [wall-a wall-b slab] :group-by [:kind :name]})
+        schedule-svg (drawing/schedule-table-svg schedule)
         sheet (drawing/drawing-sheet-svg
                {:number "A-101" :name "General Arrangement" :size :a1 :revision "C01"
                 :viewports [{:view plan :x 20 :y 20 :width 380 :height 260
@@ -895,6 +902,11 @@
     (is (re-find #"class=\"cut-element\"" section-svg))
     (is (re-find #"class=\"projected-element\"" section-svg))
     (is (re-find #"data-view-kind=\"elevation\"" elevation))
+    (is (= 3 (:schedule/total-count schedule)))
+    (is (= 2 (count (:schedule/rows schedule))))
+    (is (re-find #"data-schedule-id=\"wall-schedule\"" schedule-svg))
+    (is (re-find #"class=\"schedule-header\"" schedule-svg))
+    (is (re-find #"Wall Schedule" schedule-svg))
     (is (= 2 (count (re-seq #"class=\"viewport\"" sheet))))
     (is (re-find #"class=\"title-block\"" sheet))
     (is (re-find #"data-sheet-number=\"A-101\"" sheet))))

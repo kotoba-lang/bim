@@ -101,6 +101,10 @@
      (into base
            (concat [defs]
                    openings tags
+                   (for [wall walls
+                         :let [[[x1 y1 _] [x2 y2 _]] (get-in wall [:geometry :axis])]]
+                     (dimension-group [(sx x1) (sy y1)] [(sx x2) (sy y2)] 18
+                                      (str (format-2 (get-in wall [:quantities :length-m])) " m")))
                    [(dimension-group [(sx min-x) (sy min-y)] [(sx max-x) (sy min-y)] 28
                                      (str (format-2 (- max-x min-x)) " m"))
                     (dimension-group [(sx min-x) (sy min-y)] [(sx min-x) (sy max-y)] -28
@@ -203,3 +207,40 @@
                            {:font-family "sans-serif" :font-size 10})]]))))
 
 (defn drawing-sheet-svg [sheet] (svg/render (drawing-sheet sheet)))
+
+(defn schedule-table
+  "Render an element schedule contract as an SVG table for sheet placement."
+  ([schedule] (schedule-table schedule {}))
+  ([schedule {:keys [column-width row-height]
+              :or {column-width 130 row-height 24}}]
+   (let [fields (:schedule/fields schedule)
+         rows (:schedule/rows schedule)
+         width (* column-width (count fields))
+         height (* row-height (+ 2 (count rows)))
+         cell (fn [row-index column-index value header?]
+                (let [x (* column-index column-width) y (* row-index row-height)]
+                  [:g {:class (if header? "schedule-header" "schedule-cell")}
+                   (shapes/rect x y column-width row-height
+                                {:fill (if header? "#e2e8f0" "white")
+                                 :stroke "#64748b" :stroke-width 0.7})
+                   (shapes/text (+ x 6) (+ y 16) (str (or value ""))
+                                {:font-family "sans-serif" :font-size 10})]))]
+     (apply svg/svg {:viewBox (str "0 0 " width " " height)
+                     :data-schedule-id (:schedule/id schedule)}
+            (concat
+             [(shapes/text 0 16 (:schedule/name schedule)
+                           {:class "schedule-title" :font-family "sans-serif"
+                            :font-size 14})]
+             (map-indexed (fn [column-index field]
+                            (cell 1 column-index (:heading field) true))
+                          fields)
+             (mapcat (fn [row-index row]
+                       (map-indexed (fn [column-index field]
+                                      (cell (+ row-index 2) column-index
+                                            (get row (:key field)) false))
+                                    fields))
+                     (range) rows))))))
+
+(defn schedule-table-svg
+  ([schedule] (schedule-table-svg schedule {}))
+  ([schedule options] (svg/render (schedule-table schedule options))))
