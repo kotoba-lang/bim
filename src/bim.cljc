@@ -308,9 +308,45 @@
         indices (vec (concat bottom-tris top-tris sides))]
     {:positions positions :indices indices :normals (vec (repeat (* 2 n) [0 0 1]))}))
 
+(defn- point3 [point]
+  (let [[x y & [z]] (or point [0.0 0.0 0.0])]
+    [(or x 0.0) (or y 0.0) (or z 0.0)]))
+
+(defn- extruded-area-mesh [geometry]
+  (let [raw-points (get-in geometry [:profile :points])
+        points (if (= (first raw-points) (last raw-points)) (vec (butlast raw-points)) raw-points)
+        [ox oy oz] (get-in geometry [:position :location] [0.0 0.0 0.0])
+        boundary (mapv (fn [point] (let [[x y z] (point3 point)] [(+ ox x) (+ oy y) (+ oz z)])) points)]
+    (when (>= (count boundary) 3)
+      (slab-mesh {:geometry {:boundary boundary :thickness (:depth geometry)}}))))
+
+(defn- transform-point [[x y z] {:keys [axis1 axis2 axis3 origin scale scale2 scale3]} mapping-origin]
+  (let [[mx my mz] (point3 (:location mapping-origin))
+        [x y z] [(- x mx) (- y my) (- z mz)]
+        [a1x a1y a1z] (point3 axis1) [a2x a2y a2z] (point3 axis2)
+        [a3x a3y a3z] (point3 axis3) [ox oy oz] (point3 origin)
+        sx (or scale 1.0) sy (* sx (or scale2 1.0)) sz (* sx (or scale3 1.0))]
+    [(+ ox (* x sx a1x) (* y sy a2x) (* z sz a3x))
+     (+ oy (* x sx a1y) (* y sy a2y) (* z sz a3y))
+     (+ oz (* x sx a1z) (* y sy a2z) (* z sz a3z))]))
+
+(declare geometry-mesh)
+(defn- mapped-item-mesh [{:keys [source transform mapping-origin]}]
+  (when-let [mesh (geometry-mesh source)]
+    (update mesh :positions #(mapv (fn [point] (transform-point point transform mapping-origin)) %))))
+
+(defn- geometry-mesh [geometry]
+  (case (:kind geometry)
+    :extruded-area-solid (extruded-area-mesh geometry)
+    :mapped-item (mapped-item-mesh geometry)
+    nil))
+
 (declare wall-with-openings-mesh)
 (defn element-mesh [element]
-  (case (:kind element) :wall (wall-with-openings-mesh element) :slab (slab-mesh element) nil))
+  (case (:kind element)
+    :wall (wall-with-openings-mesh element)
+    :slab (slab-mesh element)
+    (geometry-mesh (:geometry element))))
 
 (defn add-opening-to-wall [wall opening]
   (let [length (get-in wall [:quantities :length-m])

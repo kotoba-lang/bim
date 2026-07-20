@@ -205,11 +205,24 @@
                                                          :depth 2.1}}]
                                   :geometry {:kind :extruded-area-solid
                                              :profile {:kind :rectangle :x-dim 8.0 :y-dim 0.25}
-                                             :direction [0 0 1] :depth 3.2}}]
+                                             :direction [0 0 1] :depth 3.2}}
+                                 {:id 130 :global-id "mapped-guid" :name "Mapped Furniture"
+                                  :kind :proxy :container-id 4 :placement {:location [10 20 0]}
+                                  :geometry {:kind :mapped-item
+                                             :mapping-origin {:location [10 20 0]}
+                                             :transform {:axis1 [1 0 0] :axis2 [0 1 0] :axis3 [0 0 1]
+                                                         :origin [5 6 0] :scale 2.0 :scale2 1.0 :scale3 1.0}
+                                             :source {:kind :extruded-area-solid
+                                                      :position {:location [10 20 0]}
+                                                      :profile {:kind :arbitrary-closed
+                                                                :points [[0 0] [2 0] [2 1] [0 1] [0 0]]}
+                                                      :depth 1.5}}}]
                   :ifc/units {:lengthunit {:kind :si :type :lengthunit :name :metre :scale 1.0}}}
         project (integration/import-external-ifc document)
         storey (bim/find-storey project 4)
-        wall (first (:elements storey))]
+        wall (first (:elements storey))
+        mapped (first (filter #(= 130 (:id %)) (:elements storey)))
+        mapped-mesh (bim/element-mesh mapped)]
     (is (= "Tower" (:name project)))
     (is (= "Ground" (:name storey)))
     (is (= "wall-guid" (:global-id wall)))
@@ -220,4 +233,10 @@
     (is (true? (get-in wall [:psets "Pset_WallCommon" :props :IsExternal :value])))
     (is (= "2 HR" (get-in wall [:psets "Pset_WallCommon" :props :FireRating :value])))
     (is (= {:offset 2 :sill 0} (get-in wall [:openings 0 :placement])))
-    (is (= 120 (get-in wall [:openings 0 :filled-by])))))
+    (is (= 120 (get-in wall [:openings 0 :filled-by])))
+    (is (= :other (:kind mapped)))
+    (is (= :proxy (:ifc/kind mapped)))
+    (is (= :mapped-item (get-in mapped [:geometry :kind])))
+    (is (= 8 (count (:positions mapped-mesh))))
+    (is (= [5.0 6.0 0.0] (first (:positions mapped-mesh))))
+    (is (= [9.0 8.0 3.0] (nth (:positions mapped-mesh) 6)))))

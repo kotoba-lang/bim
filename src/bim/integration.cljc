@@ -159,9 +159,10 @@
                              :thickness depth})
                   (bim/element {:id (:id source) :kind :slab :name (:name source)
                                 :geometry geometry}))
-          (bim/element {:id (:id source) :kind (:kind source) :name (:name source)
+          (bim/element {:id (:id source) :kind (if (= :proxy (:kind source)) :other (:kind source)) :name (:name source)
                         :placement (:placement source) :geometry geometry}))]
     (assoc result :global-id (:global-id source) :ifc/source-id (:id source)
+                  :ifc/kind (:kind source)
                   :ifc/property-sets (:property-sets source)
                   :psets (merge (:psets result) psets))))
 
