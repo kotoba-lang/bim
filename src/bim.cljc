@@ -313,10 +313,17 @@
     [(or x 0.0) (or y 0.0) (or z 0.0)]))
 
 (defn- extruded-area-mesh [geometry]
-  (let [raw-points (get-in geometry [:profile :points])
+  (let [profile (:profile geometry)
+        raw-points (case (:kind profile)
+                     :rectangle (let [hx (/ (:x-dim profile) 2.0) hy (/ (:y-dim profile) 2.0)]
+                                  [[(- hx) (- hy)] [hx (- hy)] [hx hy] [(- hx) hy]])
+                     :arbitrary-closed (:points profile)
+                     nil)
         points (if (= (first raw-points) (last raw-points)) (vec (butlast raw-points)) raw-points)
         [ox oy oz] (get-in geometry [:position :location] [0.0 0.0 0.0])
-        boundary (mapv (fn [point] (let [[x y z] (point3 point)] [(+ ox x) (+ oy y) (+ oz z)])) points)]
+        [px py pz] (get-in profile [:position :location] [0.0 0.0 0.0])
+        boundary (mapv (fn [point] (let [[x y z] (point3 point)]
+                                     [(+ ox px x) (+ oy py y) (+ oz pz z)])) points)]
     (when (>= (count boundary) 3)
       (slab-mesh {:geometry {:boundary boundary :thickness (:depth geometry)}}))))
 
@@ -330,7 +337,7 @@
      (+ oy (* x sx a1y) (* y sy a2y) (* z sz a3y))
      (+ oz (* x sx a1z) (* y sy a2z) (* z sz a3z))]))
 
-(declare geometry-mesh)
+(declare geometry-mesh merge-meshes)
 (defn- mapped-item-mesh [{:keys [source transform mapping-origin]}]
   (when-let [mesh (geometry-mesh source)]
     (update mesh :positions #(mapv (fn [point] (transform-point point transform mapping-origin)) %))))
@@ -339,6 +346,12 @@
   (case (:kind geometry)
     :extruded-area-solid (extruded-area-mesh geometry)
     :mapped-item (mapped-item-mesh geometry)
+    :collection (let [meshes (keep geometry-mesh (:items geometry))]
+                  (when (seq meshes) (merge-meshes meshes)))
+    :boolean-result (when (= :union (:operator geometry))
+                      (let [meshes (keep geometry-mesh [(:first-operand geometry)
+                                                        (:second-operand geometry)])]
+                        (when (seq meshes) (merge-meshes meshes))))
     nil))
 
 (declare wall-with-openings-mesh)

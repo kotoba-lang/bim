@@ -216,13 +216,26 @@
                                                       :position {:location [10 20 0]}
                                                       :profile {:kind :arbitrary-closed
                                                                 :points [[0 0] [2 0] [2 1] [0 1] [0 0]]}
-                                                      :depth 1.5}}}]
+                                                      :depth 1.5}}}
+                                 {:id 140 :global-id "clipped-guid" :name "Clipped Assembly"
+                                  :kind :proxy :container-id 4
+                                  :geometry {:kind :collection
+                                             :items [{:kind :boolean-result :operator :difference
+                                                      :first-operand {:kind :extruded-area-solid
+                                                                      :profile {:kind :rectangle :x-dim 4 :y-dim 2}
+                                                                      :depth 3}
+                                                      :second-operand {:kind :half-space-solid}}
+                                                     {:kind :extruded-area-solid
+                                                      :profile {:kind :rectangle :x-dim 1 :y-dim 1}
+                                                      :depth 0.5}]}}]
                   :ifc/units {:lengthunit {:kind :si :type :lengthunit :name :metre :scale 1.0}}}
         project (integration/import-external-ifc document)
         storey (bim/find-storey project 4)
         wall (first (:elements storey))
         mapped (first (filter #(= 130 (:id %)) (:elements storey)))
-        mapped-mesh (bim/element-mesh mapped)]
+        mapped-mesh (bim/element-mesh mapped)
+        clipped (first (filter #(= 140 (:id %)) (:elements storey)))
+        clipped-mesh (bim/element-mesh clipped)]
     (is (= "Tower" (:name project)))
     (is (= "Ground" (:name storey)))
     (is (= "wall-guid" (:global-id wall)))
@@ -239,4 +252,6 @@
     (is (= :mapped-item (get-in mapped [:geometry :kind])))
     (is (= 8 (count (:positions mapped-mesh))))
     (is (= [5.0 6.0 0.0] (first (:positions mapped-mesh))))
-    (is (= [9.0 8.0 3.0] (nth (:positions mapped-mesh) 6)))))
+    (is (= [9.0 8.0 3.0] (nth (:positions mapped-mesh) 6)))
+    (is (= :collection (get-in clipped [:geometry :kind])))
+    (is (= 8 (count (:positions clipped-mesh))))))
