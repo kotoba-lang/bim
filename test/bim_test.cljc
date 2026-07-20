@@ -470,3 +470,21 @@
     (is (= [-1.0 -0.0 -0.0] (first (:normals torus))))
     (is (= 325 (count (:positions patch))))
     (is (= 1728 (count (:indices patch))))))
+
+(deftest meshes-rational-b-spline-advanced-face
+  (let [mesh (bim/element-mesh
+              {:geometry
+               {:kind :advanced-brep
+                :faces [{:same-sense true :bounds []
+                         :surface {:kind :b-spline-surface
+                                   :u-degree 1 :v-degree 1
+                                   :control-points [[[0 0 0] [0 2 0]]
+                                                    [[2 0 0] [2 2 1]]]
+                                   :u-multiplicities [2 2] :v-multiplicities [2 2]
+                                   :u-knots [0.0 1.0] :v-knots [0.0 1.0]
+                                   :weights [[1.0 1.0] [1.0 0.75]]}}]}})]
+    (is (= 289 (count (:positions mesh))))
+    (is (= 1536 (count (:indices mesh))))
+    (is (= [0.0 0.0 0.0] (first (:positions mesh))))
+    (is (= [2.0 2.0 1.0] (last (:positions mesh))))
+    (is (every? #(not= [0.0 0.0 0.0] %) (:normals mesh)))))
