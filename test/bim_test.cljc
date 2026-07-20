@@ -2,6 +2,7 @@
   "Restoration-fidelity tests — one per original kami-bim Rust test
   (kami-engine/kami-bim/src/lib.rs `mod tests`, deleted PR #82)."
   (:require [clojure.test :refer [deftest is testing]]
+            [clojure.string :as string]
             [bim]
             [bim.integration :as integration]
             [bim.ifc :as ifc]
@@ -481,6 +482,36 @@
     (is (= 42.5 (get-in imported-project [:sites 0 :geo :elevation-m])))
     (is (re-find #"<svg" svg))
     (is (re-find #"<line" svg))))
+
+(deftest bim-external-ifc-provenance-preserves-space-and-vendor-entities-on-edit
+  (let [project (update-in
+                 (integrated-project)
+                 [:sites 0 :buildings 0 :storeys 0 :spaces]
+                 conj (bim/space {:id 40 :name "Office 101" :long-name "Open Office"
+                                  :category :office :boundary [] :height 3.2
+                                  :quantities {} :psets {}}))
+        standard (ifc/write-standard-spf project)
+        external (string/replace
+                  standard "\nENDSEC;\nEND-ISO-10303-21;"
+                  "\n#99999=IFCANNOTATION('vendor-extension',$,'Keep Vendor Data',$,$,$,$);\nENDSEC;\nEND-ISO-10303-21;")
+        imported (integration/import-ifc-spf external)
+        imported-storey (get-in imported [:sites 0 :buildings 0 :storeys 0])
+        imported-wall (first (filter #(= "10" (:global-id %))
+                                     (:elements imported-storey)))
+        edited (bim/update-element imported (:id imported-storey) (:id imported-wall)
+                                   assoc :name "Edited in Kotoba")
+        output (ifc/write-standard-spf edited)
+        reimported (ifc/read-document output)
+        wall (first (filter #(= "10" (:global-id %)) (:ifc/elements reimported)))]
+    (is (= "IFC4X3_ADD2" (:ifc/schema imported)))
+    (is (= "Open Office"
+           (get-in imported [:sites 0 :buildings 0 :storeys 0 :spaces 0 :long-name])))
+    (is (= "SPACE_40"
+           (get-in imported [:sites 0 :buildings 0 :storeys 0 :spaces 0 :global-id])))
+    (is (map? (:ifc/source-document imported)))
+    (is (string/includes? output "IFCANNOTATION"))
+    (is (string/includes? output "'Keep Vendor Data'"))
+    (is (= "Edited in Kotoba" (:name wall)))))
 
 (deftest imports-external-ifc-hierarchy-and-wall-geometry
   (let [document {:ifc/schema "IFC4X3_ADD2"
