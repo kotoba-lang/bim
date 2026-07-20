@@ -342,14 +342,23 @@
 
 (defn drawing-sheet
   "Compose renderable SVG views into a sheet with viewport frames and title block."
-  [{:keys [number name size revision viewports print-setting]
+  [{:keys [number name size revision viewports print-setting title-block]
     :or {number "A-001" name "Drawing Sheet" size :a1 revision "P01"}}]
   (let [paper-size (or (:print-setting/paper-size print-setting) size)
         [paper-width paper-height] (get sheet-sizes-mm paper-size (get sheet-sizes-mm :a1))
         portrait? (= :portrait (:print-setting/orientation print-setting))
         [width height] (if portrait?
                          [(min paper-width paper-height) (max paper-width paper-height)]
-                         [(max paper-width paper-height) (min paper-width paper-height)])]
+                         [(max paper-width paper-height) (min paper-width paper-height)])
+        title-width (or (:title-block/width title-block) 250)
+        title-height (or (:title-block/height title-block) 55)
+        title-x (- width title-width) title-y (- height title-height)
+        fields (concat
+                [["Project" (or (:title-block/project title-block) name)]
+                 ["Client" (:title-block/client title-block)]
+                 ["Drawn" (:title-block/drawn-by title-block)]
+                 ["Checked" (:title-block/checked-by title-block)]]
+                (sort-by key (:title-block/custom-fields title-block)))]
     (apply svg/svg (cond-> {:viewBox (str "0 0 " width " " height)
                             :data-sheet-number number}
                      print-setting
@@ -367,14 +376,23 @@
                  (shapes/rect x y width height {:fill "none" :stroke "#94a3b8"})
                  (shapes/text x (+ y height 14) (str title " · 1:" scale)
                               {:font-family "sans-serif" :font-size 10})]))
-            [[:g {:class "title-block"}
-              (shapes/rect (- width 250) (- height 55) 250 55
-                           {:fill "white" :stroke "#111827"})
-              (shapes/text (- width 240) (- height 34) name
-                           {:font-family "sans-serif" :font-size 14})
-              (shapes/text (- width 240) (- height 14)
-                           (str number " · " revision " · " (string/upper-case (clojure.core/name size)))
-                           {:font-family "sans-serif" :font-size 10})]]))))
+            [(into
+              [:g {:class "title-block"}
+               (shapes/rect title-x title-y title-width title-height
+                            {:fill "white" :stroke "#111827"})
+               (shapes/text (+ title-x 10) (+ title-y 18)
+                            (or (:title-block/organization title-block) name)
+                            {:font-family "sans-serif" :font-size 14})
+               (shapes/text (+ title-x 10) (+ title-y 38)
+                            (str number " · " revision " · "
+                                 (string/upper-case (clojure.core/name size)))
+                            {:font-family "sans-serif" :font-size 10})]
+              (map-indexed
+               (fn [index [label value]]
+                 (shapes/text (+ title-x 125) (+ title-y 12 (* index 10))
+                              (str label ": " value)
+                              {:font-family "sans-serif" :font-size 8}))
+               (remove (comp nil? second) fields)))]))))
 
 (defn drawing-sheet-svg [sheet] (svg/render (drawing-sheet sheet)))
 

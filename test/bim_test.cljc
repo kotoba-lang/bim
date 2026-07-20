@@ -1762,6 +1762,39 @@
     (is (re-find #"class=\"title-block\"" sheet))
     (is (re-find #"data-sheet-number=\"A-101\"" sheet))))
 
+(deftest semantic-sheet-viewports-layout-and-custom-title-block
+  (let [title-block (integration/title-block
+                     {:id :a1-standard :name "A1 Standard" :width 250 :height 55
+                      :organization "Kotoba Architects" :project "Tower"
+                      :client "Owner" :drawn-by "AK" :checked-by "BK"
+                      :custom-fields {"Discipline" "Architecture"}})
+        viewports (integration/layout-sheet-viewports
+                   [:plan :section :elevation]
+                   {:paper-width 841 :paper-height 594 :columns 2 :scale 100})
+        sheet (integration/drawing-sheet
+               {:id :a101 :number "A-101" :name "General Arrangement"
+                :viewports viewports :title-block title-block})
+        rendered (drawing/drawing-sheet-svg
+                  {:number "A-101" :name "General Arrangement" :size :a1
+                   :title-block title-block
+                   :viewports (mapv (fn [viewport]
+                                      {:view [:svg {:viewBox "0 0 100 100"}]
+                                       :x (:viewport/x viewport) :y (:viewport/y viewport)
+                                       :width (:viewport/width viewport)
+                                       :height (:viewport/height viewport)
+                                       :title (:viewport/title viewport)
+                                       :scale (:viewport/scale viewport)})
+                                    viewports)})]
+    (is (= [:plan :section :elevation] (:sheet/views sheet)))
+    (is (= 3 (count (:sheet/viewports sheet))))
+    (is (= "Kotoba Architects" (:title-block/organization (:sheet/title-block sheet))))
+    (is (re-find #"Kotoba Architects" rendered))
+    (is (re-find #"Client: Owner" rendered))
+    (is (= 3 (count (re-seq #"class=\"viewport\"" rendered))))
+    (is (thrown? #?(:clj Exception :cljs js/Error)
+                 (integration/drawing-sheet
+                  {:id :bad :viewports [(first viewports) (first viewports)]})))))
+
 (deftest view-templates-control-graphics-hidden-lines-and-annotations
   (let [wall-a (bim/wall {:id 201 :start [0 0 0] :end [6 0 0] :height 3.0})
         wall-b (bim/wall {:id 202 :start [0 2 0] :end [6 2 0] :height 3.0})
