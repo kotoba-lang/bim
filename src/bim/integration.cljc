@@ -556,6 +556,54 @@
                            (solve-from from to 1.0)
                            (solve-from to from -1.0)))
 
+                     :angle
+                     (let [vertex (get result (:vertex constraint))
+                           reference (get result (:reference constraint))
+                           target (:target constraint)
+                           angle (eval-layout-expression params planes
+                                                         (:angle constraint))
+                           length (eval-layout-expression params planes
+                                                          (:length constraint))]
+                       (if (and (every? number? vertex) (every? number? reference)
+                                (number? angle) (number? length) (pos? length))
+                         (let [base (math-atan2 (- (second reference) (second vertex))
+                                                (- (first reference) (first vertex)))
+                               theta (+ base (* direction angle))]
+                           (-> result
+                               (assign target 0 (+ (first vertex)
+                                                   (* length (math-cos theta))) constraint)
+                               (assign target 1 (+ (second vertex)
+                                                   (* length (math-sin theta))) constraint)))
+                         result))
+
+                     :symmetric
+                     (let [left-name (:left constraint) right-name (:right constraint)
+                           left (get result left-name) right (get result right-name)
+                           axis (:axis constraint)
+                           axis-value (eval-layout-expression params planes
+                                                              (:value constraint))
+                           reflect (fn [point]
+                                     (case axis
+                                       :x [(- (* 2.0 axis-value) (first point))
+                                           (second point)]
+                                       :y [(first point)
+                                           (- (* 2.0 axis-value) (second point))]
+                                       nil))]
+                       (cond
+                         (and (number? axis-value) (every? number? left))
+                         (let [candidate (reflect left)]
+                           (-> result
+                               (assign right-name 0 (first candidate) constraint)
+                               (assign right-name 1 (second candidate) constraint)))
+
+                         (and (number? axis-value) (every? number? right))
+                         (let [candidate (reflect right)]
+                           (-> result
+                               (assign left-name 0 (first candidate) constraint)
+                               (assign left-name 1 (second candidate) constraint)))
+
+                         :else result))
+
                      result)))
                points (:constraints sketch))]
           (when (= points next-points)
@@ -629,6 +677,47 @@
                          (when (> (math-abs residual) tolerance)
                            (failed! (str "family sketch " (name (:kind constraint))
                                          " constraint failed"))))
+                       :angle
+                       (let [vertex (point (:vertex constraint))
+                             reference (point (:reference constraint))
+                             target (point (:target constraint))
+                             expected (eval-layout-expression params planes
+                                                              (:angle constraint))
+                             direction (or (:direction constraint) 1.0)
+                             reference-angle
+                             (math-atan2 (- (second reference) (second vertex))
+                                         (- (first reference) (first vertex)))
+                             target-angle
+                             (math-atan2 (- (second target) (second vertex))
+                                         (- (first target) (first vertex)))
+                             residual (math-atan2
+                                       (math-sin (- target-angle reference-angle
+                                                    (* direction expected)))
+                                       (math-cos (- target-angle reference-angle
+                                                    (* direction expected))))
+                             actual-length (length [(:vertex constraint)
+                                                    (:target constraint)])
+                             expected-length (eval-layout-expression
+                                              params planes (:length constraint))]
+                         (when (or (> (math-abs residual) tolerance)
+                                   (> (math-abs (- actual-length expected-length)) tolerance))
+                           (failed! "family sketch angle constraint failed")))
+                       :symmetric
+                       (let [left (point (:left constraint))
+                             right (point (:right constraint))
+                             axis-value (eval-layout-expression params planes
+                                                                (:value constraint))
+                             residuals
+                             (case (:axis constraint)
+                               :x [(+ (- (first left) axis-value)
+                                      (- (first right) axis-value))
+                                   (- (second left) (second right))]
+                               :y [(- (first left) (first right))
+                                   (+ (- (second left) axis-value)
+                                      (- (second right) axis-value))]
+                               [##Inf])]
+                         (when (some #(> (math-abs %) tolerance) residuals)
+                           (failed! "family sketch symmetric constraint failed")))
                        (throw (ex-info "unsupported family sketch constraint"
                                        {:sketch sketch-name :constraint constraint})))))
                  [sketch-name
