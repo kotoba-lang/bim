@@ -98,27 +98,73 @@
 
 (defn resolve-reference-planes
   "Resolve named datum planes in dependency order. Plane offsets may reference
-  parameters or already resolved planes, allowing dimensions to drive geometry."
+  parameters or already resolved planes. Distance and coincident constraints
+  can solve a plane whose offset is intentionally left unspecified."
   [family params]
   (loop [resolved {} pending (:family/reference-planes family)]
     (if (empty? pending)
       resolved
       (let [ready (into {}
                         (filter (fn [[_ plane]]
-                                  (every? #(contains? resolved %)
-                                          (layout-expression-dependencies (:offset plane)))))
+                                  (and (some? (:offset plane))
+                                       (every? #(contains? resolved %)
+                                               (layout-expression-dependencies
+                                                (:offset plane))))))
                         pending)]
-        (when (empty? ready)
-          (throw (ex-info "reference plane dependency cycle or missing plane"
-                          {:pending (keys pending)})))
-        (recur (reduce-kv (fn [planes name plane]
-                            (let [offset (eval-layout-expression params planes (:offset plane))]
-                              (when-not (number? offset)
-                                (throw (ex-info "reference plane offset must be numeric"
-                                                {:plane name :offset offset})))
-                              (assoc planes name (assoc plane :name name :offset offset))))
-                          resolved ready)
-               (apply dissoc pending (keys ready)))))))
+        (if (seq ready)
+          (recur (reduce-kv (fn [planes name plane]
+                              (let [offset (eval-layout-expression params planes (:offset plane))]
+                                (when-not (number? offset)
+                                  (throw (ex-info "reference plane offset must be numeric"
+                                                  {:plane name :offset offset})))
+                                (assoc planes name (assoc plane :name name :offset offset))))
+                            resolved ready)
+                 (apply dissoc pending (keys ready)))
+          (let [solutions
+                (reduce
+                 (fn [result constraint]
+                   (let [kind (:kind constraint)
+                         [left-name right-name]
+                         (case kind
+                           :distance [(:from constraint) (:to constraint)]
+                           :coincident [(:left constraint) (:right constraint)]
+                           [nil nil])
+                         left (get-in resolved [left-name :offset])
+                         right (get-in resolved [right-name :offset])
+                         expression (when (= :distance kind) (:value constraint))
+                         expression-ready? (every? #(contains? resolved %)
+                                                   (layout-expression-dependencies expression))
+                         distance (when (and (= :distance kind) expression-ready?)
+                                    (eval-layout-expression params resolved expression))
+                         direction (or (:direction constraint) 1.0)]
+                     (cond
+                       (and (= :distance kind) (number? distance) (number? left)
+                            (contains? pending right-name))
+                       (assoc result right-name (+ left (* direction distance)))
+
+                       (and (= :distance kind) (number? distance) (number? right)
+                            (contains? pending left-name))
+                       (assoc result left-name (- right (* direction distance)))
+
+                       (and (= :coincident kind) (number? left)
+                            (contains? pending right-name))
+                       (assoc result right-name left)
+
+                       (and (= :coincident kind) (number? right)
+                            (contains? pending left-name))
+                       (assoc result left-name right)
+
+                       :else result)))
+                 {} (:family/constraints family))]
+            (when (empty? solutions)
+              (throw (ex-info "reference plane dependency cycle or under-constrained layout"
+                              {:pending (keys pending)})))
+            (recur (reduce-kv (fn [planes name offset]
+                                (assoc planes name
+                                       (assoc (get pending name) :name name :offset offset
+                                              :solved-by :constraint)))
+                              resolved solutions)
+                   (apply dissoc pending (keys solutions)))))))))
 
 (defn- validate-constraints! [family params planes]
   (doseq [constraint (:family/constraints family)]
