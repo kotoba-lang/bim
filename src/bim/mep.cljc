@@ -289,6 +289,48 @@
     {:electrical/current-a current :electrical/voltage-drop-v drop
      :electrical/voltage-drop-percent percent}))
 
+(defn select-circuit-conductor
+  "Select the smallest catalog conductor satisfying ampacity and voltage-drop
+  limits. Catalog entries require `:area-mm2` and `:ampacity-a`; optional
+  resistivity permits copper/aluminium or temperature-adjusted catalogs."
+  [circuit catalog max-voltage-drop-percent]
+  (when-not (and (seq catalog) (number? max-voltage-drop-percent)
+                 (pos? max-voltage-drop-percent))
+    (throw (ex-info "conductor catalog and voltage-drop limit are required"
+                    {:max-voltage-drop-percent max-voltage-drop-percent})))
+  (let [candidates
+        (keep (fn [{:keys [area-mm2 ampacity-a resistivity-ohm-m] :as conductor}]
+                (when (and (number? area-mm2) (pos? area-mm2)
+                           (number? ampacity-a) (pos? ampacity-a))
+                  (let [drop (voltage-drop
+                              {:apparent-power-va (:circuit/apparent-power-va circuit)
+                               :voltage-v (:circuit/voltage-v circuit)
+                               :power-factor (:circuit/power-factor circuit)
+                               :poles (:circuit/poles circuit)
+                               :length-m (:circuit/length-m circuit)
+                               :conductor-area-mm2 area-mm2
+                               :resistivity-ohm-m resistivity-ohm-m})]
+                    (when (and (<= (:electrical/current-a drop) ampacity-a)
+                               (<= (:electrical/voltage-drop-percent drop)
+                                   max-voltage-drop-percent))
+                      {:electrical.conductor/catalog-entry conductor
+                       :electrical.conductor/area-mm2 area-mm2
+                       :electrical.conductor/ampacity-a ampacity-a
+                       :electrical.conductor/current-a (:electrical/current-a drop)
+                       :electrical.conductor/voltage-drop-v
+                       (:electrical/voltage-drop-v drop)
+                       :electrical.conductor/voltage-drop-percent
+                       (:electrical/voltage-drop-percent drop)}))))
+              catalog)]
+    (when-not (seq candidates)
+      (throw (ex-info "no conductor satisfies circuit ampacity and voltage drop"
+                      {:circuit-id (:circuit/id circuit)
+                       :max-voltage-drop-percent max-voltage-drop-percent})))
+    (first (sort-by (juxt :electrical.conductor/area-mm2
+                          :electrical.conductor/ampacity-a
+                          (comp str :id :electrical.conductor/catalog-entry))
+                    candidates))))
+
 (defn analyze-panel
   [{:keys [id phases circuits main-rating-a demand-factor max-imbalance-percent
            max-voltage-drop-percent]}]

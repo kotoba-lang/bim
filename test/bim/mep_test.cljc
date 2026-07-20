@@ -86,6 +86,21 @@
     (is (< (get-in result [:panel/voltage-drops :c1
                            :electrical/voltage-drop-percent]) 3.0))))
 
+(deftest circuit-conductor-selection-enforces-ampacity-and-voltage-drop
+  (let [circuit (mep/electrical-circuit
+                 {:id :socket :name "Socket" :apparent-power-va 4600.0
+                  :voltage-v 230.0 :power-factor 1.0 :length-m 60.0})
+        catalog [{:id :cu-1.5 :area-mm2 1.5 :ampacity-a 16.0}
+                 {:id :cu-2.5 :area-mm2 2.5 :ampacity-a 24.0}
+                 {:id :cu-4 :area-mm2 4.0 :ampacity-a 32.0}
+                 {:id :cu-6 :area-mm2 6.0 :ampacity-a 41.0}]
+        selected (mep/select-circuit-conductor circuit catalog 3.0)]
+    (is (= :cu-6 (get-in selected [:electrical.conductor/catalog-entry :id])))
+    (is (= 20.0 (:electrical.conductor/current-a selected)))
+    (is (< (:electrical.conductor/voltage-drop-percent selected) 3.0))
+    (is (thrown? #?(:clj Exception :cljs js/Error)
+                 (mep/select-circuit-conductor circuit (take 3 catalog) 3.0)))))
+
 (deftest feeder-fault-duty-protection-and-coordination
   (let [analysis
         (mep/analyze-electrical-feeder
