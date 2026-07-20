@@ -37,3 +37,38 @@
     (is (= :endpoint (:snap/kind snapped)))
     (is (= [1.0 0.0] (:snap/point snapped)))
     (is (nil? (editor/snap-point [5 5] [] {:tolerance 0.1})))))
+
+(deftest model-snap-candidates-cover-endpoints-midpoints-and-intersections
+  (let [elements [{:id 10 :geometry {:kind :axis-sweep
+                                     :axis [[0.0 0.0 0.0] [4.0 0.0 0.0]]}}
+                  {:id 11 :geometry {:kind :axis-sweep
+                                     :axis [[2.0 -2.0 0.0] [2.0 2.0 0.0]]}}
+                  {:id 12 :geometry {:kind :slab-extrusion
+                                     :boundary [[5.0 0.0 0.0] [7.0 0.0 0.0]
+                                                [7.0 2.0 0.0] [5.0 2.0 0.0]]}}]
+        candidates (editor/model-snap-candidates elements)
+        by-kind (group-by :snap/kind candidates)]
+    (is (some #(= [0.0 0.0 0.0] (:snap/point %)) (:endpoint by-kind)))
+    (is (some #(= [6.0 0.0 0.0] (:snap/point %)) (:midpoint by-kind)))
+    (is (= [{:snap/kind :intersection :snap/point [2.0 0.0 0.0]
+             :element/ids [10 11]}]
+           (:intersection by-kind)))
+    (is (= :intersection
+           (:snap/kind (editor/snap-point [2.04 0.03 0.0] candidates
+                                          {:grid 0.5 :tolerance 0.1}))))))
+
+(deftest snap-segments-cover-ifc-tessellation-and-swept-routes
+  (is (= 3 (count (editor/geometry-snap-segments
+                    {:kind :triangulated-face-set
+                     :coordinates [[0 0 0] [1 0 0] [0 1 0]]
+                     :coord-indices [[1 2 3]]}))))
+  (is (= [[[0 0 0] [1 0 0]] [[1 0 0] [1 2 0]]]
+         (editor/geometry-snap-segments
+          {:kind :swept-disk-solid :directrix [[0 0 0] [1 0 0] [1 2 0]]})))
+  (let [segments (editor/geometry-snap-segments
+                  {:kind :extruded-area-solid
+                   :profile {:kind :rectangle :x-dim 2.0 :y-dim 1.0}
+                   :position {:location [5.0 6.0 1.0]}
+                   :direction [0.0 0.0 1.0] :depth 3.0})]
+    (is (= 12 (count segments)))
+    (is (some #{[[4.0 5.5 1.0] [4.0 5.5 4.0]]} segments))))
