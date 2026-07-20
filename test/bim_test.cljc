@@ -203,6 +203,40 @@
                        (- 1.0 (reduce + (map (fn [v] (* v v)) %)))) 1.0e-9)
                 (:normals pipe-mesh)))))
 
+(deftest advanced-swept-area-mesh-projection
+  (let [profile {:kind :rectangle :x-dim 0.4 :y-dim 0.2}
+        revolved (bim/element-mesh
+                  {:geometry {:kind :revolved-area-solid :profile profile
+                              :position {:location [0 0 0]}
+                              :axis {:location [2 0 0] :axis [0 1 0]}
+                              :angle #?(:clj Math/PI :cljs js/Math.PI)}})
+        fixed (bim/element-mesh
+               {:geometry {:kind :fixed-reference-swept-area-solid :profile profile
+                           :directrix {:kind :indexed-polycurve
+                                       :points [[0 0 0] [2 0 0] [3 1 0] [4 0 0]]
+                                       :segments [{:kind :line :indices [1 2]}
+                                                  {:kind :arc :indices [2 3 4]}]}
+                           :fixed-reference [0 0 1]}})
+        surface (bim/element-mesh
+                 {:geometry {:kind :surface-curve-swept-area-solid :profile profile
+                             :directrix {:kind :composite-curve
+                                         :segments
+                                         [{:same-sense true
+                                           :parent-curve {:kind :polyline
+                                                          :points [[0 0 0] [2 0 0]]}}
+                                          {:same-sense true
+                                           :parent-curve {:kind :polyline
+                                                          :points [[2 0 0] [3 1 0]]}}]}
+                             :reference-surface {:kind :plane
+                                                 :position {:axis [0 0 1]}}}})]
+    (is (= 52 (count (:positions revolved))))
+    (is (= 300 (count (:indices revolved))))
+    (is (> (count (:positions fixed)) 8))
+    (is (> (count (:indices fixed)) 24))
+    (is (= 12 (count (:positions surface))))
+    (is (= 60 (count (:indices surface))))
+    (is (every? number? (mapcat identity (:positions fixed))))))
+
 (deftest rotated-extrusion-placement-projection
   (let [element (bim/element
                  {:id 63 :kind :other :name "Rotated extrusion"
