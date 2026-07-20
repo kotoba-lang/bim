@@ -12,18 +12,30 @@
   {:worksharing/schema-version schema-version
    :worksharing/editor (editor/editor-state document)
    :worksharing/memberships memberships :worksharing/leases {}
+   :worksharing/presence {}
    :worksharing/revision 0 :worksharing/history []})
 
 (defn- capability? [state actor capability]
   (contains? (get default-capabilities (get-in state [:worksharing/memberships actor]) #{})
              capability))
 
+(defn prune-expired-leases
+  "Remove leases whose expiry is not later than `now`."
+  [state now]
+  (update state :worksharing/leases
+          (fn [leases]
+            (into {} (filter (fn [[_ lease]] (> (:lease/expires-at lease) now)) leases)))))
+
 (defn checkout
   "Acquire element leases atomically. Expired leases may be reclaimed."
   [state actor element-ids now lease-duration]
   (when-not (capability? state actor :edit)
     (throw (ex-info "actor is not authorized to edit" {:actor actor})))
-  (let [conflicts (keep (fn [element-id]
+  (when-not (and (seq element-ids) (number? lease-duration) (pos? lease-duration))
+    (throw (ex-info "checkout requires elements and a positive lease duration"
+                    {:element-ids element-ids :lease-duration lease-duration})))
+  (let [state (prune-expired-leases state now)
+        conflicts (keep (fn [element-id]
                           (let [lease (get-in state [:worksharing/leases element-id])]
                             (when (and lease (> (:lease/expires-at lease) now)
                                        (not= actor (:lease/actor lease)))
@@ -39,12 +51,62 @@
                          :lease/expires-at (+ now lease-duration)}))
             state element-ids)))
 
+(defn renew-leases
+  "Atomically renew active leases owned by an editor. A partially invalid
+  renewal is rejected without extending any lease."
+  [state actor element-ids now lease-duration]
+  (when-not (and (seq element-ids) (number? lease-duration) (pos? lease-duration))
+    (throw (ex-info "lease renewal requires elements and a positive duration"
+                    {:element-ids element-ids :lease-duration lease-duration})))
+  (let [invalid
+        (vec (filter (fn [element-id]
+                       (let [lease (get-in state [:worksharing/leases element-id])]
+                         (not (and (= actor (:lease/actor lease))
+                                   (> (:lease/expires-at lease 0) now)))))
+                     element-ids))]
+    (when (seq invalid)
+      (throw (ex-info "lease renewal requires active owned leases"
+                      {:actor actor :element-ids invalid})))
+    (reduce (fn [result element-id]
+              (-> result
+                  (assoc-in [:worksharing/leases element-id :lease/renewed-at] now)
+                  (assoc-in [:worksharing/leases element-id :lease/expires-at]
+                            (+ now lease-duration))))
+            state element-ids)))
+
 (defn relinquish [state actor element-ids]
   (reduce (fn [result element-id]
             (if (= actor (get-in result [:worksharing/leases element-id :lease/actor]))
               (update result :worksharing/leases dissoc element-id)
               result))
           state element-ids))
+
+(defn heartbeat
+  "Publish ephemeral editor presence with a monotonic client sequence."
+  [state actor now {:keys [sequence view-id cursor selection] :as presence}]
+  (when-not (capability? state actor :read)
+    (throw (ex-info "actor is not authorized to publish presence" {:actor actor})))
+  (let [previous (get-in state [:worksharing/presence actor])]
+    (when-not (and (integer? sequence) (<= 0 sequence)
+                   (> sequence (:presence/sequence previous -1)))
+      (throw (ex-info "presence sequence must advance monotonically"
+                      {:actor actor :sequence sequence
+                       :previous (:presence/sequence previous)})))
+    (assoc-in state [:worksharing/presence actor]
+              {:presence/actor actor :presence/sequence sequence
+               :presence/updated-at now :presence/view-id view-id
+               :presence/cursor cursor :presence/selection (set selection)
+               :presence/metadata (dissoc presence :sequence :view-id :cursor :selection)})))
+
+(defn active-presence
+  "Return peers updated within the timeout, excluding an optional local actor."
+  ([state now timeout] (active-presence state now timeout nil))
+  ([state now timeout local-actor]
+   (into {}
+         (filter (fn [[actor presence]]
+                   (and (not= actor local-actor)
+                        (> (+ (:presence/updated-at presence) timeout) now))))
+         (:worksharing/presence state))))
 
 (defn- path-overlap? [left right]
   (let [common (min (count left) (count right))]
@@ -57,18 +119,35 @@
   [state actor base-revision now transaction]
   (when-not (capability? state actor :edit)
     (throw (ex-info "actor is not authorized to edit" {:actor actor})))
-  (let [element-ids (set (:transaction/element-ids transaction))
-        invalid-leases
-        (keep (fn [element-id]
-                (let [lease (get-in state [:worksharing/leases element-id])]
-                  (when-not (and (= actor (:lease/actor lease))
-                                 (> (:lease/expires-at lease 0) now))
-                    element-id)))
-              element-ids)]
-    (when (seq invalid-leases)
-      (throw (ex-info "transaction requires active element leases"
-                      {:actor actor :element-ids (vec invalid-leases)})))
-    (let [incoming-paths (mapv :path (:operations transaction))
+  (when-not (:id transaction)
+    (throw (ex-info "worksharing transaction requires an id" {:transaction transaction})))
+  (let [existing (first (filter #(= (:transaction/id %) (:id transaction))
+                                (:worksharing/history state)))]
+    (when (and existing
+               (not (and (= actor (:actor existing))
+                         (= transaction (:transaction existing)))))
+      (throw (ex-info "transaction id conflicts with prior submission"
+                      {:transaction/id (:id transaction) :revision (:revision existing)})))
+    (if existing
+      {:worksharing/status :deduplicated :worksharing/workspace state
+       :worksharing/revision (:revision existing)}
+      (do
+        (when (> base-revision (:worksharing/revision state))
+          (throw (ex-info "transaction base revision is ahead of workspace"
+                          {:base-revision base-revision
+                           :workspace-revision (:worksharing/revision state)})))
+        (let [element-ids (set (:transaction/element-ids transaction))
+          invalid-leases
+          (keep (fn [element-id]
+                  (let [lease (get-in state [:worksharing/leases element-id])]
+                    (when-not (and (= actor (:lease/actor lease))
+                                   (> (:lease/expires-at lease 0) now))
+                      element-id)))
+                element-ids)
+          _ (when (seq invalid-leases)
+              (throw (ex-info "transaction requires active element leases"
+                              {:actor actor :element-ids (vec invalid-leases)})))
+          incoming-paths (mapv :path (:operations transaction))
           concurrent (filter #(> (:revision %) base-revision) (:worksharing/history state))
           conflicts (vec
                      (for [entry concurrent
@@ -86,7 +165,21 @@
                              (update :worksharing/history conj
                                      {:revision next-revision :base-revision base-revision
                                       :actor actor :transaction/id (:id transaction)
+                                      :transaction transaction
                                       :element-ids element-ids :paths incoming-paths
                                       :timestamp now}))]
           {:worksharing/status :applied :worksharing/workspace next-state
-           :worksharing/revision next-revision})))))
+           :worksharing/revision next-revision})))))))
+
+(defn changes-since
+  "Return an ordered replay delta after a durable workspace revision."
+  [state revision]
+  (when-not (and (integer? revision) (<= 0 revision (:worksharing/revision state)))
+    (throw (ex-info "worksharing revision cursor is out of range"
+                    {:revision revision :head (:worksharing/revision state)})))
+  {:worksharing/schema-version schema-version
+   :worksharing/from-revision revision
+   :worksharing/to-revision (:worksharing/revision state)
+   :worksharing/transactions
+   (mapv #(select-keys % [:revision :base-revision :actor :transaction :timestamp])
+         (filter #(> (:revision %) revision) (:worksharing/history state)))})

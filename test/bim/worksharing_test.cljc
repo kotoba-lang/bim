@@ -12,6 +12,10 @@
                  {:id "tx-a" :transaction/element-ids [10]
                   :operations [{:op :set :path [:elements 10 :name] :value "Wall A"}]})
         state-a (:worksharing/workspace applied)
+        retried (worksharing/submit state-a "alice" 0 200
+                                    {:id "tx-a" :transaction/element-ids [10]
+                                     :operations [{:op :set :path [:elements 10 :name]
+                                                   :value "Wall A"}]})
         disjoint (worksharing/submit
                   state-a "alice" 0 111
                   {:id "tx-b" :transaction/element-ids [10]
@@ -20,8 +24,18 @@
         conflict (worksharing/submit
                   state-b "alice" 0 112
                   {:id "tx-c" :transaction/element-ids [10]
-                   :operations [{:op :set :path [:elements 10 :name] :value "Wall C"}]})]
+                   :operations [{:op :set :path [:elements 10 :name] :value "Wall C"}]})
+        renewed (worksharing/renew-leases checked-out "alice" [10] 150 60)
+        presence (-> initial
+                     (worksharing/heartbeat "reviewer" 100
+                                            {:sequence 0 :view-id :ground
+                                             :cursor [1.0 2.0] :selection [10]})
+                     (worksharing/heartbeat "alice" 110
+                                            {:sequence 2 :view-id :section
+                                             :cursor [3.0 4.0] :selection []}))]
     (is (= :applied (:worksharing/status applied)))
+    (is (= :deduplicated (:worksharing/status retried)))
+    (is (= 1 (:worksharing/revision retried)))
     (is (= :applied (:worksharing/status disjoint)))
     (is (= "Wall A" (get-in state-b [:worksharing/editor :editor/document
                                       :elements 10 :name])))
@@ -30,6 +44,30 @@
     (is (= :conflict (:worksharing/status conflict)))
     (is (= [:elements 10 :name]
            (get-in conflict [:worksharing/conflicts 0 :incoming-path])))
+    (is (= 210 (get-in renewed [:worksharing/leases 10 :lease/expires-at])))
+    (is (= 150 (get-in renewed [:worksharing/leases 10 :lease/renewed-at])))
+    (is (empty? (:worksharing/leases
+                 (worksharing/prune-expired-leases renewed 210))))
+    (is (= #{"reviewer"}
+           (set (keys (worksharing/active-presence presence 120 30 "alice")))))
+    (is (empty? (worksharing/active-presence presence 131 30 "alice")))
+    (is (= [1 2] (mapv :revision
+                       (:worksharing/transactions
+                        (worksharing/changes-since state-b 0)))))
+    (is (= [2] (mapv :revision
+                     (:worksharing/transactions
+                      (worksharing/changes-since state-b 1)))))
+    (is (thrown-with-msg? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+                          #"id conflicts"
+                          (worksharing/submit
+                           state-a "alice" 1 120
+                           {:id "tx-a" :transaction/element-ids [10]
+                            :operations [{:op :set :path [:elements 10 :name]
+                                          :value "Different"}]})))
+    (is (thrown-with-msg? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+                          #"sequence"
+                          (worksharing/heartbeat presence "alice" 121
+                                                 {:sequence 2 :selection []})))
     (is (thrown-with-msg? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
                           #"not authorized"
                           (worksharing/checkout initial "reviewer" [10] 100 60)))
