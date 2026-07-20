@@ -103,17 +103,53 @@
 (defn- spatial-descendants [node type]
   (filter #(= type (:type %)) (tree-seq #(seq (:children %)) :children node)))
 
+(defn- imported-property-value [{:keys [value value-type]}]
+  (case value-type
+    :ifcboolean (bim/bool-value value)
+    :ifcinteger (bim/int-value value)
+    (:ifcreal :ifclengthmeasure :ifcareameasure :ifcvolumemeasure) (bim/real-value value)
+    (bim/text-value (str value))))
+
+(defn- imported-psets [source]
+  (into {}
+        (map (fn [[name pset]]
+               [name (bim/property-set name
+                                        (into {} (map (fn [[property-name property]]
+                                                        [(keyword property-name)
+                                                         (imported-property-value property)]))
+                                              (:properties pset)))])
+             (:property-sets source))))
+
+(defn- attach-imported-openings [wall source]
+  (reduce
+   (fn [host opening]
+     (let [host-location (get-in source [:placement :location] [0.0 0.0 0.0])
+           opening-location (get-in opening [:placement :location] host-location)
+           profile (get-in opening [:geometry :profile])
+           width (:x-dim profile) height (get-in opening [:geometry :depth])
+           offset (- (first opening-location) (first host-location))
+           sill (- (nth opening-location 2 0.0) (nth host-location 2 0.0))]
+       (if (and width height)
+         (bim/add-opening-to-wall
+          host (bim/rectangular-opening {:id (:id opening) :offset offset :sill sill
+                                         :width width :height height
+                                         :filled-by (:filled-by opening)}))
+         host)))
+   wall (:openings source)))
+
 (defn- imported-element [source]
   (let [[x y z] (get-in source [:placement :location] [0.0 0.0 0.0])
         geometry (:geometry source)
         profile (:profile geometry)
         x-dim (:x-dim profile) y-dim (:y-dim profile) depth (:depth geometry)
+        psets (imported-psets source)
         result
         (case (:kind source)
           :wall (if (and x-dim y-dim depth)
-                  (bim/wall {:id (:id source) :name (:name source)
-                             :start [x y z] :end [(+ x x-dim) y z]
-                             :thickness y-dim :height depth})
+                  (attach-imported-openings
+                   (bim/wall {:id (:id source) :name (:name source)
+                              :start [x y z] :end [(+ x x-dim) y z]
+                              :thickness y-dim :height depth}) source)
                   (bim/element {:id (:id source) :kind :wall :name (:name source)
                                 :geometry geometry}))
           :slab (if (and x-dim y-dim depth)
@@ -125,7 +161,17 @@
                                 :geometry geometry}))
           (bim/element {:id (:id source) :kind (:kind source) :name (:name source)
                         :placement (:placement source) :geometry geometry}))]
-    (assoc result :global-id (:global-id source) :ifc/source-id (:id source))))
+    (assoc result :global-id (:global-id source) :ifc/source-id (:id source)
+                  :ifc/property-sets (:property-sets source)
+                  :psets (merge (:psets result) psets))))
+
+(defn- imported-unit-system [document]
+  (let [{:keys [name prefix]} (get-in document [:ifc/units :lengthunit])
+        length (cond
+                 (and (= :metre name) (= :milli prefix)) :millimetre
+                 (= :metre name) :metre
+                 :else :metre)]
+    (bim/unit-system {:length length})))
 
 (defn import-external-ifc
   "Map a shared IFC exchange document into the BIM spatial hierarchy."
@@ -156,7 +202,7 @@
                                 buildings)
           site-node (first sites)]
       {:id (or (:global-id root) (:id root)) :name (:name root) :description ""
-       :units (bim/unit-system) :world-origin [0.0 0.0 0.0] :true-north-rad 0.0
+       :units (imported-unit-system document) :world-origin [0.0 0.0 0.0] :true-north-rad 0.0
        :psets {}
        :sites [(bim/site {:id (or (:id site-node) 1) :name (or (:name site-node) "Site")
                           :geo nil :placement (:placement site-node)
