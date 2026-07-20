@@ -246,6 +246,93 @@
                    #(update % :elements
                             (fn [elements] (vec (remove (fn [e] (= element-id (:id e))) elements))))))
 
+(defn- translate-point [point delta]
+  (when point (mapv + point (take (count point) delta))))
+
+(defn- translate-placement [placement delta]
+  (cond
+    (= :identity placement) {:location (vec delta)}
+    (nil? placement) {:location (vec delta)}
+    (map? placement) (update placement :location
+                             #(translate-point (or % [0.0 0.0 0.0]) delta))
+    :else placement))
+
+(declare translate-geometry)
+
+(defn- translate-curve [curve delta]
+  (case (:kind curve)
+    :polyline (update curve :points #(mapv (fn [p] (translate-point p delta)) %))
+    :indexed-polycurve (update curve :points #(mapv (fn [p] (translate-point p delta)) %))
+    :composite-curve (update curve :segments
+                             #(mapv (fn [segment]
+                                      (update segment :parent-curve translate-curve delta)) %))
+    :line (update curve :origin translate-point delta)
+    (:circle :ellipse) (update curve :position translate-placement delta)
+    :b-spline-curve (update curve :control-points
+                            #(mapv (fn [p] (translate-point p delta)) %))
+    curve))
+
+(defn- translate-bound [bound delta]
+  (cond-> bound
+    (seq (:points bound))
+    (update :points #(mapv (fn [p] (translate-point p delta)) %))
+    (seq (:edges bound))
+    (update :edges
+            #(mapv (fn [edge]
+                     (-> edge
+                         (update :start translate-point delta)
+                         (update :end translate-point delta)
+                         (update :curve translate-curve delta))) %))))
+
+(defn- translate-face [face delta]
+  (cond-> (update face :bounds #(mapv (fn [bound] (translate-bound bound delta)) %))
+    (get-in face [:surface :position])
+    (update-in [:surface :position] translate-placement delta)
+    (= :b-spline-surface (get-in face [:surface :kind]))
+    (update-in [:surface :control-points]
+               #(mapv (fn [row] (mapv (fn [p] (translate-point p delta)) row)) %))))
+
+(defn translate-geometry
+  "Translate renderable BIM/IFC geometry by a world-space `[dx dy dz]` delta."
+  [geometry delta]
+  (case (:kind geometry)
+    :axis-sweep (update geometry :axis #(mapv (fn [p] (translate-point p delta)) %))
+    :slab-extrusion (update geometry :boundary #(mapv (fn [p] (translate-point p delta)) %))
+    (:extruded-area-solid :revolved-area-solid
+     :fixed-reference-swept-area-solid :surface-curve-swept-area-solid)
+    (cond-> (update geometry :position translate-placement delta)
+      (:directrix geometry) (update :directrix translate-curve delta))
+    :swept-disk-solid (update geometry :directrix
+                              #(mapv (fn [p] (translate-point p delta)) %))
+    :mapped-item (update-in geometry [:transform :origin]
+                            #(translate-point (or % [0.0 0.0 0.0]) delta))
+    (:faceted-brep :advanced-brep)
+    (update geometry :faces #(mapv (fn [face] (translate-face face delta)) %))
+    (:triangulated-face-set :polygonal-face-set)
+    (update geometry :coordinates #(mapv (fn [p] (translate-point p delta)) %))
+    :collection (update geometry :items #(mapv (fn [item] (translate-geometry item delta)) %))
+    :boolean-result (-> geometry
+                        (update :first-operand translate-geometry delta)
+                        (update :second-operand translate-geometry delta))
+    :half-space-solid
+    (cond-> geometry
+      (get-in geometry [:base-surface :position])
+      (update-in [:base-surface :position] translate-placement delta)
+      (:position geometry) (update :position translate-placement delta)
+      (get-in geometry [:boundary :points])
+      (update-in [:boundary :points]
+                 #(mapv (fn [p] (translate-point p delta)) %)))
+    geometry))
+
+(defn translate-element
+  "Move an element without changing its identity, type, quantities, or links."
+  [element delta]
+  (when-not (and (= 3 (count delta)) (every? number? delta))
+    (throw (ex-info "element translation must be a numeric 3D delta" {:delta delta})))
+  (-> element
+      (update :placement translate-placement delta)
+      (update :geometry translate-geometry (vec delta))))
+
 (declare polygon-area)
 
 (defn room-space
