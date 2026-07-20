@@ -1000,6 +1000,42 @@
     (is (= 2 (count (:mep.analysis/segments analysis))))
     (is (pos? (:mep.analysis/total-pressure-loss-pa analysis)))))
 
+(deftest owns-and-atomically-connects-mep-equipment-connectors
+  (let [pump-connector (integration/mep-connector
+                        {:id :pump-out :point [1 0 0] :direction [1 0 0]
+                         :domain :piping :shape :round :size 0.1
+                         :flow-direction :out})
+        pipe-connector (integration/mep-connector
+                        {:id :pipe-in :point [1 0 0] :direction [-1 0 0]
+                         :domain :piping :shape :round :size 0.1
+                         :flow-direction :in})
+        pump (integration/mep-equipment
+              {:id 300 :name "CHW Pump" :kind :pump :system-id :chw
+               :connectors [pump-connector] :demands {:flow-m3-s 0.005}
+               :geometry {:kind :swept-disk-solid
+                          :directrix [[0.5 0 0] [1 0 0]] :radius 0.2}})
+        pipe (integration/mep-segment
+              {:id 301 :kind :pipe :start [1 0 0] :end [4 0 0] :diameter 0.1
+               :system-id :chw :connectors [pipe-connector]})
+        connected (integration/connect-mep-elements [pump pipe] :pump-out :pipe-in)
+        elements (:mep/elements connected)]
+    (is (= 300 (get-in pump [:mep/connectors 0 :connector/owner-id])))
+    (is (= :pipe-in (get-in elements [0 :mep/connectors 0 :connector/connected-to])))
+    (is (= :pump-out (get-in elements [1 :mep/connectors 0 :connector/connected-to])))
+    (is (= {:connector-a :pump-out :connector-b :pipe-in :owner-a 300 :owner-b 301
+            :domain :piping :shape :round :size 0.1}
+           (:mep/connection connected)))
+    (is (thrown-with-msg?
+         #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+         #"already connected"
+         (integration/connect-mep-elements elements :pump-out :pipe-in)))
+    (is (thrown-with-msg?
+         #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+         #"require a transition"
+         (integration/connect-mep-elements
+          [pump (assoc-in pipe [:mep/connectors 0 :connector/size] 0.15)]
+          :pump-out :pipe-in)))))
+
 (deftest sizes-and-balances-branching-mep-networks
   (let [network {:source-node :pump
                  :segments [{:id :main :from :pump :to :tee :length-m 10.0}
