@@ -721,6 +721,31 @@
     (is (= 1650.0 (get-in combination [:structural.analysis/member-checks :bar :force-n])))
     (is (true? (get-in combination [:structural.analysis/member-checks :bar :passes?])))))
 
+(deftest calculates-section-properties-and-beam-design-checks
+  (let [rectangle (integration/structural-section-properties
+                   {:kind :rectangle :width-m 0.2 :depth-m 0.4})
+        i-section (integration/structural-section-properties
+                   {:kind :i-shape :overall-width-m 0.2 :overall-depth-m 0.4
+                    :web-thickness-m 0.01 :flange-thickness-m 0.02})
+        check (integration/simply-supported-beam-check
+               {:span-m 6.0 :section {:kind :rectangle :width-m 0.2 :depth-m 0.4}
+                :elastic-modulus-pa 2.0e11 :yield-strength-pa 2.5e8
+                :uniform-load-n-m 10000.0 :axial-force-n 80000.0
+                :resistance-factor 0.9 :deflection-limit-ratio 360.0})]
+    (is (< (#?(:clj Math/abs :cljs js/Math.abs)
+            (- 0.08 (:area-m2 rectangle))) 1.0e-12))
+    (is (< (#?(:clj Math/abs :cljs js/Math.abs)
+            (- (/ (* 0.2 0.4 0.4 0.4) 12.0) (:strong-inertia-m4 rectangle)))
+           1.0e-12))
+    (is (> (:strong-inertia-m4 i-section) (:weak-inertia-m4 i-section)))
+    (is (= 45000.0 (:beam/max-moment-nm check)))
+    (is (= 30000.0 (:beam/max-shear-n check)))
+    (is (< (:beam/max-deflection-m check) (:beam/deflection-limit-m check)))
+    (is (true? (:beam/passes? check)))
+    (is (= (:beam/utilization check)
+           (max (:beam/strength-utilization check)
+                (:beam/deflection-utilization check))))))
+
 (deftest routes-and-validates-mep-systems
   (let [route (integration/route-mep [0.0 0.0 0.0] [3.0 0.0 0.0]
                                      [{:min [1.0 -0.5 -0.5] :max [2.0 0.5 0.5]}
