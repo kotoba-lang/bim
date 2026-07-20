@@ -1646,6 +1646,20 @@
     (is (= 3.0 (get-in trimmed-left [:quantities :length-m])))
     (is (= #{11} (:wall/joins joined-left)))
     (is (= #{10} (:wall/joins joined-right)))
+    (is (= [[0.0 0.0 0.0] [3.1 0.0 0.0]]
+           (get-in joined-left [:geometry :axis])))
+    (is (= [[3.0 0.1 0.0] [3.0 5.0 0.0]]
+           (get-in joined-right [:geometry :axis])))
+    (is (= {:style :butt :role :primary}
+           (get-in joined-left [:wall/join-details 11])))
+    (is (= {:style :butt :role :secondary}
+           (get-in joined-right [:wall/join-details 10])))
+    (is (= (reduce max (map second (:positions (bim/element-mesh joined-left))))
+           (reduce min (map second (:positions (bim/element-mesh joined-right)))))
+        "cleaned solids meet at one face without overlap or a gap")
+    (is (= [[0.0 0.0 0.0] [3.0 0.0 0.0]]
+           (get-in (first (bim/join-walls left right {:style :centerline}))
+                   [:geometry :axis])))
     (is (thrown-with-msg?
          #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
          #"share an elevation"
