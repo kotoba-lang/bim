@@ -19,7 +19,8 @@
   already distinguishable scalar types.
 
   Depends on kotoba-lang/brep for element BREP geometry."
-  (:require [brep.polygon :as polygon]
+  (:require [brep.mesh-csg :as mesh-csg]
+            [brep.polygon :as polygon]
             [brep.spline :as spline]))
 
 ;; ── spatial hierarchy ──
@@ -763,21 +764,28 @@
                         (mapv + base (mapv #(* start %) direction)))))))))
 
 (defn- boolean-result-mesh [geometry]
-  (let [first-operand (:first-operand geometry) second-operand (:second-operand geometry)]
+  (let [first-operand (:first-operand geometry) second-operand (:second-operand geometry)
+        first-mesh (geometry-mesh first-operand) second-mesh (geometry-mesh second-operand)]
     (case (:operator geometry)
-      :union (let [meshes (keep geometry-mesh [first-operand second-operand])]
-               (when (seq meshes) (merge-meshes meshes)))
+      :union (if (and first-mesh second-mesh)
+               (mesh-csg/mesh-boolean :union first-mesh second-mesh)
+               (when-let [meshes (seq (keep identity [first-mesh second-mesh]))]
+                 (merge-meshes meshes)))
       :difference
-      (when (and (= :extruded-area-solid (:kind first-operand))
-                 (= :half-space-solid (:kind second-operand)))
-        (some-> (clipped-extrusion first-operand second-operand) extruded-area-mesh))
+      (if (and first-mesh second-mesh)
+        (mesh-csg/mesh-boolean :difference first-mesh second-mesh)
+        (when (and (= :extruded-area-solid (:kind first-operand))
+                   (= :half-space-solid (:kind second-operand)))
+          (some-> (clipped-extrusion first-operand second-operand) extruded-area-mesh)))
       :intersection
-      (when (and (= :extruded-area-solid (:kind first-operand))
-                 (= :half-space-solid (:kind second-operand)))
-        ;; Intersection is the complementary extrusion interval.
-        (some-> (clipped-extrusion first-operand
-                                   (update second-operand :agreement-flag not))
-                extruded-area-mesh))
+      (if (and first-mesh second-mesh)
+        (mesh-csg/mesh-boolean :intersection first-mesh second-mesh)
+        (when (and (= :extruded-area-solid (:kind first-operand))
+                   (= :half-space-solid (:kind second-operand)))
+          ;; Intersection is the complementary extrusion interval.
+          (some-> (clipped-extrusion first-operand
+                                     (update second-operand :agreement-flag not))
+                  extruded-area-mesh)))
       nil)))
 
 (defn- swept-disk-mesh [geometry]

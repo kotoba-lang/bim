@@ -550,3 +550,27 @@
     (is (pos? (count (:positions mesh))))
     (is (= (count (:positions mesh)) (count (:indices mesh))))
     (is (< (#?(:clj Math/abs :cljs js/Math.abs) (- projected-area 3.0)) 1.0e-3))))
+
+(deftest evaluates-general-closed-mesh-booleans
+  (let [solid (fn [location]
+                {:kind :extruded-area-solid
+                 :profile {:kind :rectangle :x-dim 2.0 :y-dim 2.0}
+                 :position {:location location} :direction [0 0 1] :depth 2.0})
+        volume (fn [{:keys [positions indices]}]
+                 (#?(:clj Math/abs :cljs js/Math.abs)
+                  (/ (reduce + (map (fn [[ia ib ic]]
+                                      (let [[ax ay az] (nth positions ia)
+                                            [bx by bz] (nth positions ib)
+                                            [cx cy cz] (nth positions ic)]
+                                        (+ (* ax (- (* by cz) (* bz cy)))
+                                           (* ay (- (* bz cx) (* bx cz)))
+                                           (* az (- (* bx cy) (* by cx))))))
+                                    (partition 3 indices)))
+                     6.0)))
+        operand-a (solid [0 0 0]) operand-b (solid [1 1 1])]
+    (doseq [[operator expected] [[:union 15.0] [:difference 7.0] [:intersection 1.0]]]
+      (let [mesh (bim/element-mesh
+                  {:geometry {:kind :boolean-result :operator operator
+                              :first-operand operand-a :second-operand operand-b}})]
+        (is (seq (:indices mesh)))
+        (is (< (#?(:clj Math/abs :cljs js/Math.abs) (- expected (volume mesh))) 1.0e-6))))))
