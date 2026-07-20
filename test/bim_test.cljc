@@ -1709,3 +1709,32 @@
          #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
          #"invalid compound wall layer"
          (bim/set-wall-layers wall [(bim/material-layer "Bad" 0 false :other)])))))
+
+(deftest gable-roof-produces-closed-brep-quantities-and-ifc-geometry
+  (let [roof (bim/gable-roof
+              {:id 60 :boundary [[0.0 0.0 3.0] [10.0 0.0 3.0]
+                                 [10.0 6.0 3.0] [0.0 6.0 3.0]]
+               :slope-rad (/ #?(:clj Math/PI :cljs js/Math.PI) 4.0)
+               :thickness 0.25 :material "Timber roof"})
+        mesh (bim/element-mesh roof)
+        project (bim/add-element (integrated-project) 3 roof)
+        imported (integration/import-ifc-spf (ifc/write-standard-spf project))
+        imported-roof (first (filter #(= "60" (:global-id %))
+                                     (get-in imported [:sites 0 :buildings 0 :storeys 0
+                                                       :elements])))]
+    (is (= :gable (get-in roof [:roof/definition :kind])))
+    (is (= [[0.0 3.0 6.0] [10.0 3.0 6.0]]
+           (get-in roof [:roof/definition :ridge])))
+    (is (= :faceted-brep (get-in roof [:geometry :kind])))
+    (is (= 12 (count (get-in roof [:geometry :faces]))))
+    (is (seq (:positions mesh)))
+    (is (seq (:indices mesh)))
+    (is (< (#?(:clj Math/abs :cljs js/Math.abs)
+            (- (* 20.0 (#?(:clj Math/sqrt :cljs js/Math.sqrt) 18.0))
+               (get-in roof [:quantities :gross-area-m2]))) 1.0e-9))
+    (is (= :roof (:kind imported-roof)))
+    (is (= :faceted-brep (get-in imported-roof [:geometry :kind])))
+    (is (thrown-with-msg?
+         #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+         #"planar rectangle"
+         (bim/gable-roof {:id 61 :boundary [[0 0 0] [4 0 0] [3 2 0] [0 2 0]]})))))
