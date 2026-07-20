@@ -30,11 +30,49 @@
 (defn- format-2 [value]
   #?(:clj (format "%.2f" (double value)) :cljs (.toFixed value 2)))
 
+(defn- category-visible? [options element]
+  (not= false (get (:category-visibility options) (:kind element) true)))
+
+(defn- category-override [options element defaults]
+  (merge defaults (get (:category-overrides options) (:kind element))))
+
+(defn- annotation-groups [annotations sx sy style]
+  (mapv
+   (fn [annotation]
+     (case (:kind annotation)
+       :dimension
+       (dimension-group (mapv (fn [value transform] (transform value))
+                              (:from annotation) [sx sy])
+                        (mapv (fn [value transform] (transform value))
+                              (:to annotation) [sx sy])
+                        (or (:offset annotation) 18)
+                        (or (:label annotation)
+                            (str (format-2 (:value annotation)) " m")))
+       :level
+       (let [y (sy (second (:point annotation)))
+             x (sx (first (:point annotation)))
+             width (or (:width annotation) 120)]
+         [:g {:class "level-annotation"}
+          (shapes/line x y (+ x width) y (merge {:stroke "#334155"} style))
+          (shapes/text (+ x width 4) (- y 3) (:label annotation)
+                       (merge {:font-family "sans-serif" :font-size 10} style))])
+       (:tag :text)
+       (let [[x y] (:point annotation)]
+         (shapes/text (sx x) (sy y) (:text annotation)
+                      (merge {:class (if (= :tag (:kind annotation))
+                                       "element-tag" "text-annotation")
+                              :font-family "sans-serif" :font-size 10}
+                             style (:style annotation))))
+       [:g {:class "unsupported-annotation" :data-kind (name (:kind annotation))}]))
+   annotations))
+
 (defn floor-plan
   ([storey] (floor-plan storey {}))
-  ([storey {:keys [scale margin] :or {scale 60 margin 40}}]
-   (let [walls (filter #(= :wall (:kind %)) (:elements storey))
-         slabs (filter #(= :slab (:kind %)) (:elements storey))
+  ([storey {:keys [scale margin] :or {scale 60 margin 40} :as options}]
+   (let [walls (filter #(and (= :wall (:kind %)) (category-visible? options %))
+                       (:elements storey))
+         slabs (filter #(and (= :slab (:kind %)) (category-visible? options %))
+                       (:elements storey))
          points (concat (mapcat #(get-in % [:geometry :axis]) walls)
                         (mapcat #(get-in % [:geometry :boundary]) slabs))
          xs (map first points) ys (map second points)
@@ -50,14 +88,17 @@
               (shapes/text margin 24 (str (:name storey) " · Floor Plan · 1:100")
                            {:font-family "sans-serif" :font-size 16})]
              (for [slab slabs]
-               [:polygon {:points (string/join " " (map (fn [[x y _]] (str (sx x) "," (sy y)))
-                                                         (get-in slab [:geometry :boundary])))
-                          :fill "#eef2f7" :stroke "#64748b"}])
+               [:polygon (merge {:points (string/join " " (map (fn [[x y _]] (str (sx x) "," (sy y)))
+                                                                 (get-in slab [:geometry :boundary])))}
+                                (category-override options slab
+                                                   {:fill "#eef2f7" :stroke "#64748b"}))])
              (for [wall walls
                    :let [[[x1 y1 _] [x2 y2 _]] (get-in wall [:geometry :axis])]]
                (shapes/line (sx x1) (sy y1) (sx x2) (sy y2)
-                            {:stroke "#111827"
-                             :stroke-width (max 2 (* scale (get-in wall [:geometry :profile :thickness])))})))))))
+                            (category-override
+                             options wall
+                             {:stroke "#111827"
+                              :stroke-width (max 2 (* scale (get-in wall [:geometry :profile :thickness])))}))))))))
 
 (defn floor-plan-svg
   ([storey] (floor-plan-svg storey {}))
@@ -67,8 +108,10 @@
   "Annotated plan view with wall openings, element tags, overall dimensions,
   and vector metadata suitable for placement on a drawing sheet."
   ([storey] (documented-floor-plan storey {}))
-  ([storey {:keys [scale margin] :or {scale 60 margin 60} :as options}]
-   (let [walls (filter #(= :wall (:kind %)) (:elements storey))
+  ([storey {:keys [scale margin show-tags? annotations annotation-style]
+             :or {scale 60 margin 60 show-tags? true} :as options}]
+   (let [walls (filter #(and (= :wall (:kind %)) (category-visible? options %))
+                       (:elements storey))
          points (mapcat #(get-in % [:geometry :axis]) walls)
          {:keys [min max]} (bounds-2d points) [min-x min-y] min [max-x max-y] max
          height (+ (* scale (- max-y min-y)) (* 2 margin))
@@ -92,12 +135,12 @@
                           (+ 2 (* scale (get-in wall [:geometry :profile :thickness])))})
             (shapes/line (sx ox1) (sy oy1) (sx ox2) (sy oy2)
                          {:stroke "#64748b" :stroke-width 1})])
-         tags (for [wall walls
+         tags (when show-tags? (for [wall walls
                     :let [[[x1 y1 _] [x2 y2 _]] (get-in wall [:geometry :axis])]]
                 (shapes/text (sx (/ (+ x1 x2) 2.0)) (- (sy (/ (+ y1 y2) 2.0)) 8)
                              (str "W" (:id wall))
                              {:class "element-tag" :text-anchor "middle"
-                              :font-family "sans-serif" :font-size 10 :fill "#334155"}))]
+                              :font-family "sans-serif" :font-size 10 :fill "#334155"})))]
      (into base
            (concat [defs]
                    openings tags
@@ -108,7 +151,8 @@
                    [(dimension-group [(sx min-x) (sy min-y)] [(sx max-x) (sy min-y)] 28
                                      (str (format-2 (- max-x min-x)) " m"))
                     (dimension-group [(sx min-x) (sy min-y)] [(sx min-x) (sy max-y)] -28
-                                     (str (format-2 (- max-y min-y)) " m"))])))))
+                                     (str (format-2 (- max-y min-y)) " m"))]
+                   (annotation-groups annotations sx sy annotation-style))))))
 
 (defn documented-floor-plan-svg
   ([storey] (documented-floor-plan-svg storey {}))
@@ -133,12 +177,16 @@
 (defn orthographic-view
   "Generate a section or elevation from mesh bounds. Sections distinguish cut
   objects from projected objects; elevations emit front-view silhouettes."
-  [building {:keys [kind axis cut-position depth scale margin title]
-             :or {kind :section axis :x cut-position 0.0 depth 1000.0 scale 50 margin 50}}]
+  [building {:keys [kind axis cut-position depth scale margin title hidden-line?
+                    show-tags? annotations annotation-style]
+             :or {kind :section axis :x cut-position 0.0 depth 1000.0 scale 50
+                  margin 50 hidden-line? true show-tags? true}
+             :as options}]
   (let [horizontal-index (if (= axis :x) 0 1)
         entries (keep (fn [element]
-                        (when-let [bounds (mesh-projection-bounds element horizontal-index)]
-                          {:element element :bounds bounds}))
+                        (when (category-visible? options element)
+                          (when-let [bounds (mesh-projection-bounds element horizontal-index)]
+                            {:element element :bounds bounds})))
                       (all-building-elements building))
         visible (filter (fn [{:keys [bounds]}]
                           (let [[near far] (:depth bounds)]
@@ -146,6 +194,17 @@
                               (and (<= near (+ cut-position depth)) (>= far cut-position))
                               (<= (#?(:clj Math/abs :cljs js/Math.abs) (- near cut-position)) depth))))
                         entries)
+        visible (sort-by #(first (get-in % [:bounds :depth])) visible)
+        contained? (fn [outer inner]
+                     (and (<= (first (:horizontal outer)) (first (:horizontal inner)))
+                          (>= (second (:horizontal outer)) (second (:horizontal inner)))
+                          (<= (first (:vertical outer)) (first (:vertical inner)))
+                          (>= (second (:vertical outer)) (second (:vertical inner)))))
+        visible (if (and hidden-line? (= kind :elevation))
+                  (reduce (fn [result entry]
+                            (if (some #(contained? (:bounds %) (:bounds entry)) result)
+                              result (conj result entry))) [] visible)
+                  visible)
         points (mapcat (fn [{:keys [bounds]}]
                          (let [[x0 x1] (:horizontal bounds) [z0 z1] (:vertical bounds)]
                            [[x0 z0] [x1 z1]])) visible)
@@ -168,13 +227,19 @@
                    :data-element-id (:id element)}
                (shapes/rect (sx x0) (sz z1) (max 1 (- (sx x1) (sx x0)))
                             (max 1 (- (sz z0) (sz z1)))
-                            {:fill (if cut? "#dbeafe" "none")
-                             :stroke (if cut? "#0f172a" "#64748b")
-                             :stroke-width (if cut? 2 1)
-                             :stroke-dasharray (when-not cut? "4 3")})
-               (shapes/text (/ (+ (sx x0) (sx x1)) 2.0) (- (sz z1) 4)
-                            (str (string/upper-case (subs (name (:kind element)) 0 1)) (:id element))
-                            {:class "element-tag" :text-anchor "middle" :font-size 9})])))))
+                            (category-override
+                             options element
+                             {:fill (if cut? "#dbeafe" "none")
+                              :stroke (if cut? "#0f172a" "#64748b")
+                              :stroke-width (if cut? 2 1)
+                              :stroke-dasharray (when (and (not cut?) (not hidden-line?))
+                                                  "4 3")}))
+               (when show-tags?
+                 (shapes/text (/ (+ (sx x0) (sx x1)) 2.0) (- (sz z1) 4)
+                              (str (string/upper-case (subs (name (:kind element)) 0 1))
+                                   (:id element))
+                              {:class "element-tag" :text-anchor "middle" :font-size 9}))])
+            (annotation-groups annotations sx sz annotation-style)))))
 
 (defn orthographic-view-svg [building options]
   (svg/render (orthographic-view building options)))
