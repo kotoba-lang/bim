@@ -157,9 +157,12 @@
 
 (defn quantities
   ([] (quantities {}))
-  ([{:keys [gross-area-m2 net-area-m2 gross-volume-m3 net-volume-m3 weight-kg length-m]}]
-   {:gross-area-m2 gross-area-m2 :net-area-m2 net-area-m2 :gross-volume-m3 gross-volume-m3
-    :net-volume-m3 net-volume-m3 :weight-kg weight-kg :length-m length-m}))
+  ([{:keys [gross-area-m2 net-area-m2 gross-volume-m3 net-volume-m3 weight-kg length-m]
+     :as values}]
+   (merge {:gross-area-m2 gross-area-m2 :net-area-m2 net-area-m2
+           :gross-volume-m3 gross-volume-m3 :net-volume-m3 net-volume-m3
+           :weight-kg weight-kg :length-m length-m}
+          values)))
 
 ;; ── scene projection (consumed by a kotoba-lang/pipelines-style scene adapter) ──
 
@@ -657,6 +660,62 @@
      :roof/definition {:kind :gable :boundary (mapv vec boundary)
                        :ridge [ridge-start ridge-end] :slope-rad slope-rad
                        :thickness thickness})))
+
+(defn straight-stair
+  "Construct a monolithic straight stair run as ordered tread solids."
+  [{:keys [id name start direction width run-length total-rise riser-count material]
+    :or {name "Straight Stair" direction [1.0 0.0 0.0] width 1.0
+         run-length 3.0 total-rise 3.0 riser-count 18 material "Concrete"}}]
+  (when-not (and (valid-point3? start) (valid-point3? direction)
+                 (finite-number? width) (pos? width)
+                 (finite-number? run-length) (pos? run-length)
+                 (finite-number? total-rise) (pos? total-rise)
+                 (integer? riser-count) (> riser-count 1))
+    (throw (ex-info "straight stair requires valid dimensions and at least two risers"
+                    {:start start :direction direction :width width
+                     :run-length run-length :total-rise total-rise
+                     :riser-count riser-count})))
+  (let [[dx dy dz] direction
+        plan-length (sqrt (+ (* dx dx) (* dy dy)))]
+    (when (or (< plan-length 1.0e-9)
+              (> (#?(:clj Math/abs :cljs js/Math.abs) dz) 1.0e-9))
+      (throw (ex-info "straight stair direction must be horizontal" {:direction direction})))
+    (let [travel [(/ dx plan-length) (/ dy plan-length) 0.0]
+          tread-depth (/ run-length riser-count)
+          riser-height (/ total-rise riser-count)
+          steps
+          (mapv (fn [index]
+                  (let [center (mapv + start
+                                     (mapv #(* (+ index 0.5) tread-depth %) travel))]
+                    {:kind :extruded-area-solid
+                     :position {:location center :axis [0.0 0.0 1.0]
+                                :ref-direction travel}
+                     :profile {:kind :rectangle :x-dim tread-depth :y-dim width}
+                     :direction [0.0 0.0 1.0]
+                     :depth (* (inc index) riser-height)}))
+                (range riser-count))
+          walking-length (sqrt (+ (* run-length run-length)
+                                  (* total-rise total-rise)))]
+      (assoc
+       (element
+        {:id id :kind :stair :name name :global-id (str id) :placement :identity
+         :geometry {:kind :collection :items steps}
+         :material-layers [(material-layer material riser-height false :concrete)]
+         :classification (classification-ref "Uniclass" "Ss_35_10" "Stair systems")
+         :quantities (quantities {:width-m width :run-length-m run-length
+                                  :total-rise-m total-rise :walking-length-m walking-length
+                                  :riser-count riser-count :riser-height-m riser-height
+                                  :tread-depth-m tread-depth})
+         :psets {"Pset_StairCommon"
+                 (property-set "Pset_StairCommon"
+                               {:NumberOfRiser (int-value riser-count)
+                                :RiserHeight (real-value riser-height)
+                                :TreadLength (real-value tread-depth)})}
+         :openings [] :connected-to []})
+       :stair/definition {:kind :straight-run :start (vec start) :direction travel
+                          :width width :run-length run-length :total-rise total-rise
+                          :riser-count riser-count :riser-height riser-height
+                          :tread-depth tread-depth}))))
 
 (defn- point3 [point]
   (let [[x y & [z]] (or point [0.0 0.0 0.0])]
