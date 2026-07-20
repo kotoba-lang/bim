@@ -339,6 +339,57 @@
            (get-in instance [:family/reference-planes :origin-copy :offset])))
     (is (= 2.3 (get-in instance [:family/reference-planes :head :offset])))))
 
+(deftest hosted-family-sketch-and-void-cut
+  (let [family (integration/family-definition
+                {:id "hosted-window" :name "Hosted Window" :category :window
+                 :host {:required? true :kinds #{:wall} :faces #{:interior :exterior}}
+                 :parameters {:width {:type :length :default 1.2}
+                              :height {:type :length :default 1.5}
+                              :depth {:type :length :default 0.3}}
+                 :reference-planes {:left {:axis :x :offset 0.0}
+                                    :right {:axis :x :offset [:param :width]}
+                                    :sill {:axis :y :offset 0.0}
+                                    :head {:axis :y :offset [:param :height]}}
+                 :sketches
+                 {:opening {:name "Window Opening"
+                            :points {:bottom-left [[:reference :left] [:reference :sill]]
+                                     :bottom-right [[:reference :right] [:reference :sill]]
+                                     :top-right [[:reference :right] [:reference :head]]
+                                     :top-left [[:reference :left] [:reference :head]]}
+                            :loop [:bottom-left :bottom-right :top-right :top-left]
+                            :constraints [{:kind :horizontal :from :bottom-left :to :bottom-right}
+                                          {:kind :vertical :from :bottom-right :to :top-right}]}}
+                 :template
+                 {:kind :window :name "Hosted Window"
+                  :geometry {:kind :extruded-area-solid
+                             :profile [:sketch-profile :opening]
+                             :direction [0 0 1] :depth [:param :depth]}
+                  :voids [{:id "opening-cut"
+                           :geometry {:kind :extruded-area-solid
+                                      :profile [:sketch-profile :opening]
+                                      :direction [0 0 1] :depth [:param :depth]}}]}})
+        host (bim/wall {:id 100 :name "Host Wall" :start [0 0 0] :end [5 0 0]
+                        :thickness 0.3 :height 3.0})
+        instance (integration/place-hosted-family
+                  family 101 {:width 1.8 :height 1.4} host
+                  {:face :exterior :placement {:location [2.0 0.0 0.8]}})
+        cut-host (integration/apply-family-voids host instance)]
+    (is (= [[0.0 0.0] [1.8 0.0] [1.8 1.4] [0.0 1.4] [0.0 0.0]]
+           (get-in instance [:geometry :profile :points])))
+    (is (= 100 (:host/id instance)))
+    (is (= :exterior (:host/face instance)))
+    (is (= 1 (count (:openings cut-host))))
+    (is (= {:offset 2.0 :sill 0.8}
+           (get-in cut-host [:openings 0 :placement])))
+    (is (= {:width 1.8 :height 1.4}
+           (select-keys (get-in cut-host [:openings 0 :profile]) [:width :height])))
+    (is (= 101 (get-in cut-host [:openings 0 :filled-by])))
+    (is (thrown-with-msg? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+                          #"host kind is not allowed"
+                          (integration/place-hosted-family
+                           family 102 {} (bim/element {:id 200 :kind :slab})
+                           {:face :exterior})))))
+
 (deftest rejects-family-formula-and-nesting-cycles
   (let [formula-cycle (integration/family-definition
                        {:id "cycle" :parameters {}

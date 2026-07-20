@@ -16,10 +16,12 @@
 (defn- round [value] (#?(:clj Math/round :cljs js/Math.round) value))
 
 (defn family-definition
-  [{:keys [id name category parameters formulas reference-planes constraints types template]}]
+  [{:keys [id name category parameters formulas reference-planes sketches constraints
+           host types template]}]
   {:family/id id :family/name name :family/category category
    :family/parameters (or parameters {}) :family/formulas (or formulas {})
    :family/reference-planes (or reference-planes {})
+   :family/sketches (or sketches {}) :family/host host
    :family/constraints (vec constraints) :family/types (or types {})
    :family/template template :family/schema-version schema-version})
 
@@ -199,6 +201,49 @@
       (throw (ex-info "unsupported family constraint" {:constraint constraint}))))
   {:parameters params :reference-planes planes})
 
+(defn resolve-family-sketches
+  "Resolve parameterized 2D point loops into closed IFC-compatible profiles."
+  [family params planes]
+  (into {}
+        (map (fn [[sketch-name sketch]]
+               (let [points
+                     (into {}
+                           (map (fn [[point-name coordinates]]
+                                  (let [point (mapv #(eval-layout-expression params planes %)
+                                                    coordinates)]
+                                    (when-not (and (= 2 (count point)) (every? number? point))
+                                      (throw (ex-info "family sketch point must resolve to 2D numbers"
+                                                      {:sketch sketch-name :point point-name
+                                                       :coordinates point})))
+                                    [point-name point])))
+                           (:points sketch))
+                     loop-names (vec (:loop sketch))
+                     loop-points (mapv points loop-names)]
+                 (when (or (< (count loop-names) 3) (some nil? loop-points)
+                           (not= (count loop-names) (count (distinct loop-names))))
+                   (throw (ex-info "family sketch must be a closed loop of unique named points"
+                                   {:sketch sketch-name :loop loop-names})))
+                 (doseq [constraint (:constraints sketch)]
+                   (let [[a b] (map points [(:from constraint) (:to constraint)])
+                         tolerance (or (:tolerance constraint) 1.0e-9)]
+                     (case (:kind constraint)
+                       :horizontal
+                       (when (> (math-abs (- (second a) (second b))) tolerance)
+                         (throw (ex-info "family sketch horizontal constraint failed"
+                                         {:sketch sketch-name :constraint constraint})))
+                       :vertical
+                       (when (> (math-abs (- (first a) (first b))) tolerance)
+                         (throw (ex-info "family sketch vertical constraint failed"
+                                         {:sketch sketch-name :constraint constraint})))
+                       (throw (ex-info "unsupported family sketch constraint"
+                                       {:sketch sketch-name :constraint constraint})))))
+                 [sketch-name
+                  {:kind :arbitrary-closed
+                   :name (or (:name sketch) (name sketch-name))
+                   :plane (or (:plane sketch) :xy)
+                   :points (conj loop-points (first loop-points))}]))
+        (:family/sketches family))))
+
 (defn resolve-family-parameters
   "Resolve defaults and overrides, then formulas by dependency order. Cycles,
   missing references, invalid values, and failed dimensional constraints throw."
@@ -255,11 +300,14 @@
 (defn- instantiate-family* [catalog family type-key instance-id overrides stack]
   (let [params (resolve-family-parameters family type-key overrides (some? catalog))
         planes (resolve-reference-planes family params)
+        sketches (resolve-family-sketches family params planes)
         substituted (walk/postwalk #(cond
                                       (and (vector? %) (= :param (first %)))
                                       (get params (second %))
                                       (and (vector? %) (= :reference (first %)))
                                       (get-in planes [(second %) :offset])
+                                      (and (vector? %) (= :sketch-profile (first %)))
+                                      (get sketches (second %))
                                       (and (vector? %) (contains? #{:+ :- :* :/ :min :max}
                                                                   (first %)))
                                       (eval-expr {} %)
@@ -271,7 +319,9 @@
                         :family/id (:family/id family)
                         :family/type type-key
                         :family/parameters params
-                        :family/reference-planes planes)
+                        :family/reference-planes planes
+                        :family/sketches sketches
+                        :family/host (:family/host family))
       type-spec (assoc :type-object
                        {:id (or (:id type-spec) (str (:family/id family) ":" (name type-key)))
                         :global-id (:global-id type-spec)
@@ -292,6 +342,58 @@
   (let [family (get-in catalog [:family-catalog/families family-id])]
     (when-not family (throw (ex-info "family not found" {:family-id family-id})))
     (instantiate-family* catalog family type-key instance-id overrides #{family-id})))
+
+(defn place-hosted-family
+  "Instantiate and attach a hosted family to an allowed host category and face."
+  [family instance-id overrides host {:keys [face placement]}]
+  (let [{:keys [kinds faces required?]} (:family/host family)
+        host-kind (:kind host)]
+    (when (and required? (nil? host))
+      (throw (ex-info "family requires a host" {:family-id (:family/id family)})))
+    (when (and (seq kinds) (not (contains? (set kinds) host-kind)))
+      (throw (ex-info "family host kind is not allowed"
+                      {:family-id (:family/id family) :host-kind host-kind :allowed kinds})))
+    (when (and (seq faces) (not (contains? (set faces) face)))
+      (throw (ex-info "family host face is not allowed"
+                      {:family-id (:family/id family) :face face :allowed faces})))
+    (assoc (instantiate-family family instance-id overrides)
+           :host/id (:id host) :host/global-id (:global-id host)
+           :host/face face :placement (or placement :identity))))
+
+(defn apply-family-voids
+  "Apply a hosted instance's void solids to its host using serializable CSG."
+  [host instance]
+  (cond
+    (empty? (:voids instance)) host
+
+    (= :wall (:kind host))
+    (reduce
+     (fn [result void]
+       (let [points (get-in void [:geometry :profile :points])
+             xs (map first points) ys (map second points)
+             [offset _ sill] (get-in instance [:placement :location] [0.0 0.0 0.0])]
+         (when-not (and (seq points) (every? number? (concat xs ys)))
+           (throw (ex-info "hosted wall void requires a resolved 2D profile"
+                           {:void-id (:id void)})))
+         (bim/add-opening-to-wall
+          result
+          (bim/rectangular-opening
+           {:id (:id void) :offset (+ offset (reduce min xs))
+            :sill (+ sill (reduce min ys))
+            :width (- (reduce max xs) (reduce min xs))
+            :height (- (reduce max ys) (reduce min ys))
+            :depth (get-in void [:geometry :depth])
+            :filled-by (:id instance)}))))
+     host (:voids instance))
+
+    :else
+    (update host :geometry
+            (fn [geometry]
+              (reduce (fn [result void]
+                        {:kind :boolean-result :operator :difference
+                         :first-operand result :second-operand (:geometry void)
+                         :void/id (:id void)})
+                      geometry (:voids instance))))))
 
 (defn drawing-view
   [{:keys [id kind name scale storey-id building-id section-box cut-plane direction
