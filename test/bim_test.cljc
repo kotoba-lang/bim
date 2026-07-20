@@ -353,12 +353,25 @@
                  :sketches
                  {:opening {:name "Window Opening"
                             :points {:bottom-left [[:reference :left] [:reference :sill]]
+                                     :origin-copy [[:reference :left] [:reference :sill]]
                                      :bottom-right [[:reference :right] [:reference :sill]]
                                      :top-right [[:reference :right] [:reference :head]]
                                      :top-left [[:reference :left] [:reference :head]]}
                             :loop [:bottom-left :bottom-right :top-right :top-left]
                             :constraints [{:kind :horizontal :from :bottom-left :to :bottom-right}
-                                          {:kind :vertical :from :bottom-right :to :top-right}]}}
+                                          {:kind :vertical :from :bottom-right :to :top-right}
+                                          {:kind :coincident :from :bottom-left :to :origin-copy}
+                                          {:kind :distance :from :bottom-left :to :bottom-right
+                                           :value [:param :width]}
+                                          {:kind :equal-length
+                                           :first [:bottom-left :bottom-right]
+                                           :second [:top-left :top-right]}
+                                          {:kind :parallel
+                                           :first [:bottom-left :bottom-right]
+                                           :second [:top-left :top-right]}
+                                          {:kind :perpendicular
+                                           :first [:bottom-left :bottom-right]
+                                           :second [:bottom-right :top-right]}]}}
                  :template
                  {:kind :window :name "Hosted Window"
                   :geometry {:kind :extruded-area-solid
@@ -389,6 +402,28 @@
                           (integration/place-hosted-family
                            family 102 {} (bim/element {:id 200 :kind :slab})
                            {:face :exterior})))))
+
+(deftest adaptive-family-points-drive-freeform-path
+  (let [family (integration/family-definition
+                {:id "adaptive-rail" :name "Adaptive Rail" :category :railing
+                 :adaptive {:min-points 2 :max-points 8 :closed? false}
+                 :parameters {:radius {:type :length :default 0.04 :min 0.01}}
+                 :template {:kind :proxy :name "Adaptive Rail"
+                            :placement {:location [:adaptive-point 0]}
+                            :geometry {:kind :swept-disk-solid
+                                       :directrix [:adaptive-path]
+                                       :radius [:param :radius]}}})
+        points [[0 0 0] [2 0 1] [4 2 1]]
+        instance (integration/instantiate-adaptive-family family 300 {:radius 0.05} points)
+        mesh (bim/element-mesh instance)]
+    (is (= points (get-in instance [:geometry :directrix])))
+    (is (= [0 0 0] (get-in instance [:placement :location])))
+    (is (= 0.05 (get-in instance [:geometry :radius])))
+    (is (seq (:positions mesh)))
+    (is (thrown-with-msg? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+                          #"coincident consecutive"
+                          (integration/instantiate-adaptive-family
+                           family 301 {} [[0 0 0] [0 0 0]])))))
 
 (deftest rejects-family-formula-and-nesting-cycles
   (let [formula-cycle (integration/family-definition
