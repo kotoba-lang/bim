@@ -768,6 +768,50 @@
     (is (= :mep/dangling-connection
            (get-in federation [:federation/issues 0 :issue/type])))))
 
+(deftest derives-shared-node-structural-model-from-bim-elements
+  (let [beam (integration/structural-member
+              (bim/element {:id 280 :kind :beam :name "B1"
+                            :geometry {:axis [[0 0 3] [6 0 3]]}})
+              {:role :beam :analytical-axis [[0 0 3] [6 0 3]]
+               :section {:kind :rectangle :width-m 0.25 :depth-m 0.5}
+               :material {:name "Steel" :elastic-modulus-pa 2.0e11
+                          :yield-strength-pa 3.55e8 :density-kg-m3 7850}})
+        column-a (integration/structural-member
+                  (bim/element {:id 281 :kind :column :name "C1"
+                                :geometry {:axis [[0 0 0] [0 0 3]]}})
+                  {:role :column :analytical-axis [[0 0 0] [0 0 3]]})
+        column-b (integration/structural-member
+                  (bim/element {:id 282 :kind :column :name "C2"
+                                :geometry {:axis [[6 0 0] [6 0 3]]}})
+                  {:role :column :analytical-axis [[6 0 0] [6 0 3]]})
+        wall (integration/structural-member
+              (bim/wall {:id 283 :name "Shear wall" :start [0 2 0] :end [4 2 0]
+                         :height 3 :thickness 0.25})
+              {:role :shear-wall})
+        storey (bim/storey {:id 3 :name "Structure" :elevation 0 :height 3
+                            :placement :identity :spaces []
+                            :elements [beam column-a column-b wall]})
+        project (-> (bim/project "Frame")
+                    (update :sites conj
+                            (bim/site {:id 1 :name "Site" :placement :identity
+                                       :buildings [(bim/building
+                                                    {:id 2 :name "Frame" :placement :identity
+                                                     :reference-elevation 0 :storeys [storey]})]})))
+        model (integration/generate-structural-model project)
+        node-by-point (into {} (map (juxt :structural.node/point identity)
+                                    (:structural/nodes model)))]
+    (is (= 4 (count (:structural/nodes model))))
+    (is (= 3 (count (:structural/members model))))
+    (is (= 1 (count (:structural/shells model))))
+    (is (= 4 (:structural/source-element-count model)))
+    (is (= [true true true] (:structural.node/restraints (node-by-point [0 0 0]))))
+    (is (= [false false false] (:structural.node/restraints (node-by-point [0 0 3]))))
+    (is (= 0.125 (get-in model [:structural/members 0 :structural.member/area-m2])))
+    (is (= 283 (get-in model [:structural/shells 0 :structural.shell/source-element-id])))
+    (is (empty? (integration/validate-structural-model model)))
+    (is (= [0.0 0.0 -9.80665]
+           (get-in model [:structural/load-cases 0 :structural.load-case/gravity])))))
+
 (deftest solves-linear-structural-truss-analysis
   (let [model (integration/structural-model
                {:nodes [(integration/structural-node
