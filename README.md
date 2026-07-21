@@ -15,6 +15,12 @@ sweep) plus a scene-projection format for storey-LOD rendering.
 
 Depends on `kotoba-lang/brep` for element BREP geometry.
 
+Drawing exchange uses shared DXF and ISO PDF libraries. JVM workflows that
+require Autodesk DWG can use `bim.interchange.dwg/export-floor-plan!` with an
+explicitly configured ODA/Autodesk-compatible DXF→DWG converter command. The
+adapter verifies the converter exit status and recognized DWG `AC10xx` file
+signature, so ASCII DXF content is never mislabeled as DWG.
+
 ## Status
 
 Restored — the single-namespace data model ported from the original
