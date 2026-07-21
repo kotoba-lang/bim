@@ -80,6 +80,64 @@
     (is (zero? (get-in released
                        [:structural.frame/members :ab :local-end-forces :m2])))))
 
+(deftest three-dimensional-frame-analysis-includes-biaxial-bending-and-torsion
+  (let [member {:id :ab :start-node :a :end-node :b :area-m2 0.01
+                :elastic-modulus-pa 2.0e11 :shear-modulus-pa 8.0e10
+                :torsion-m4 1.0e-5 :inertia-y-m4 8.0e-6
+                :inertia-z-m4 1.2e-5}
+        result
+        (structural/analyze-3d-frame
+         {:nodes [{:id :a :point [0.0 0.0 0.0]
+                   :restraints [true true true true true true]}
+                  {:id :b :point [3.0 0.0 0.0]
+                   :restraints [false false false false false false]}]
+          :members [member]
+          :load-case {:nodal-loads [{:node :b :fz -1000.0 :mx 1000.0}]}})
+        released
+        (structural/analyze-3d-frame
+         {:nodes [{:id :a :point [0.0 0.0 0.0]
+                   :restraints [true true true true false true]}
+                  {:id :b :point [6.0 0.0 0.0]
+                   :restraints [false true true false false false]}]
+          :members [(assoc member :release-start #{:rx :ry} :release-end #{:rx :ry})]
+          :load-case {:member-loads [{:member :ab :qz -10000.0}]}})
+        free (get-in result [:structural.frame-3d/nodes :b])
+        fixed (get-in result [:structural.frame-3d/nodes :a])
+        forces (get-in result [:structural.frame-3d/members :ab :local-end-forces])]
+    (is (< (#?(:clj Math/abs :cljs js/Math.abs) (- -0.005625 (:uz free))) 1.0e-12))
+    (is (< (#?(:clj Math/abs :cljs js/Math.abs) (- 0.00375 (:rx free))) 1.0e-12))
+    (is (< (#?(:clj Math/abs :cljs js/Math.abs) (- 1000.0 (:rfz fixed))) 1.0e-9))
+    (is (< (#?(:clj Math/abs :cljs js/Math.abs) (- -1000.0 (:rmx fixed))) 1.0e-9))
+    (is (= -1000.0 (:vz2 forces)))
+    (is (= 1000.0 (:t2 forces)))
+    (is (= 30000.0 (get-in released [:structural.frame-3d/nodes :a :rfz])))
+    (is (= 30000.0 (get-in released [:structural.frame-3d/nodes :b :rfz])))
+    (is (zero? (get-in released
+                       [:structural.frame-3d/members :ab :local-end-forces :my1])))
+    (is (zero? (get-in released
+                       [:structural.frame-3d/members :ab :local-end-forces :my2])))
+    (is (zero? (get-in released
+                       [:structural.frame-3d/members :ab :local-end-forces :t1])))
+    (is (zero? (get-in released
+                       [:structural.frame-3d/members :ab :local-end-forces :t2])))))
+
+(deftest three-dimensional-frame-builds-stable-local-axes-for-vertical-members
+  (let [result
+        (structural/analyze-3d-frame
+         {:nodes [{:id :base :point [0.0 0.0 0.0]
+                   :restraints [true true true true true true]}
+                  {:id :top :point [0.0 0.0 3.0]
+                   :restraints [true true false true true true]}]
+          :members [{:id :column :start-node :base :end-node :top :area-m2 0.01
+                     :elastic-modulus-pa 2.0e11 :shear-modulus-pa 8.0e10
+                     :torsion-m4 1.0e-5 :inertia-y-m4 8.0e-6
+                     :inertia-z-m4 1.2e-5}]
+          :load-case {:nodal-loads [{:node :top :fz 1000.0}]}})]
+    (is (< (#?(:clj Math/abs :cljs js/Math.abs)
+            (- 1.5e-6 (get-in result [:structural.frame-3d/nodes :top :uz])))
+           1.0e-15))
+    (is (= -1000.0 (get-in result [:structural.frame-3d/nodes :base :rfz])))))
+
 (deftest constant-strain-triangle-plane-stress-analysis
   (let [model {:nodes [{:id :a :point [0.0 0.0] :restraints [true true]}
                        {:id :b :point [1.0 0.0] :restraints [false true]}

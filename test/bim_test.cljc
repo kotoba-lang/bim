@@ -1144,6 +1144,37 @@
     (is (= 45000.0 (get-in combination [:structural.analysis/reactions :a 1])))
     (is (= :uls (:structural.analysis/combination combination)))))
 
+(deftest canonical-structural-model-runs-six-dof-space-frame-analysis
+  (let [model
+        (integration/structural-model
+         {:nodes [(integration/structural-node
+                   {:id :a :point [0.0 0.0 0.0]
+                    :restraints [true true true true true true]})
+                  (integration/structural-node
+                   {:id :b :point [3.0 0.0 0.0]
+                    :restraints [false false false false false false]})]
+          :members [(integration/structural-analysis-member
+                     {:id :beam :start-node :a :end-node :b :area-m2 0.01
+                      :elastic-modulus-pa 2.0e11 :shear-modulus-pa 8.0e10
+                      :torsion-m4 1.0e-5 :inertia-y-m4 8.0e-6
+                      :inertia-z-m4 1.2e-5})]
+          :load-cases [(integration/structural-load-case
+                        {:id :live :name "Live" :kind :live
+                         :nodal-loads [{:node :b :fz -1000.0 :mx 1000.0}]})]
+          :combinations [(integration/structural-load-combination
+                          {:id :uls-3d-frame :name "ULS" :factors {:live 1.5}})]})
+        result (integration/analyze-3d-frame-model model :live)
+        combined (integration/analyze-3d-frame-combination model :uls-3d-frame)]
+    (is (= :frame-3d (:structural.analysis/kind result)))
+    (is (< (#?(:clj Math/abs :cljs js/Math.abs)
+            (- -0.005625 (get-in result [:structural.analysis/displacements :b 2])))
+           1.0e-12))
+    (is (< (#?(:clj Math/abs :cljs js/Math.abs)
+            (- 0.00375 (get-in result [:structural.analysis/displacements :b 3])))
+           1.0e-12))
+    (is (= 1500.0 (get-in combined [:structural.analysis/reactions :a 2])))
+    (is (= :uls-3d-frame (:structural.analysis/combination combined)))))
+
 (deftest calculates-section-properties-and-beam-design-checks
   (let [rectangle (integration/structural-section-properties
                    {:kind :rectangle :width-m 0.2 :depth-m 0.4})

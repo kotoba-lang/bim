@@ -2275,7 +2275,8 @@
 (defn structural-analysis-member
   [{:keys [id start-node end-node area-m2 elastic-modulus-pa yield-strength-pa
            resistance-factor section material density-kg-m3 inertia-m4
-           release-start-moment? release-end-moment? connection]}]
+           release-start-moment? release-end-moment? connection shear-modulus-pa
+           torsion-m4 inertia-y-m4 inertia-z-m4 up-vector release-start release-end]}]
   {:structural.member/id id :structural.member/start-node start-node
    :structural.member/end-node end-node :structural.member/area-m2 area-m2
    :structural.member/elastic-modulus-pa elastic-modulus-pa
@@ -2284,6 +2285,13 @@
    :structural.member/section section :structural.member/material material
    :structural.member/density-kg-m3 density-kg-m3
    :structural.member/inertia-m4 inertia-m4
+   :structural.member/shear-modulus-pa shear-modulus-pa
+   :structural.member/torsion-m4 torsion-m4
+   :structural.member/inertia-y-m4 inertia-y-m4
+   :structural.member/inertia-z-m4 inertia-z-m4
+   :structural.member/up-vector up-vector
+   :structural.member/release-start (set release-start)
+   :structural.member/release-end (set release-end)
    :structural.member/release-start-moment? (boolean release-start-moment?)
    :structural.member/release-end-moment? (boolean release-end-moment?)
    :structural.member/connection connection})
@@ -2783,6 +2791,88 @@
                 (update model :structural/load-cases conj synthetic) synthetic-id)]
     (assoc result :structural.analysis/load-case nil
                   :structural.analysis/combination combination-id)))
+
+(defn analyze-3d-frame-model
+  "Run the six-DOF space-frame solver through the canonical BIM structural model."
+  [model load-case-id]
+  (when-let [issues (seq (validate-structural-model model))]
+    (throw (ex-info "invalid structural model" {:issues issues})))
+  (let [load-case (frame-load-case model load-case-id)
+        frame
+        (structural/analyze-3d-frame
+         {:nodes (mapv (fn [node]
+                         {:id (:structural.node/id node)
+                          :point (:structural.node/point node)
+                          :restraints (:structural.node/restraints node)})
+                       (:structural/nodes model))
+          :members
+          (mapv (fn [member]
+                  {:id (:structural.member/id member)
+                   :start-node (:structural.member/start-node member)
+                   :end-node (:structural.member/end-node member)
+                   :area-m2 (:structural.member/area-m2 member)
+                   :elastic-modulus-pa (:structural.member/elastic-modulus-pa member)
+                   :shear-modulus-pa (:structural.member/shear-modulus-pa member)
+                   :torsion-m4 (:structural.member/torsion-m4 member)
+                   :inertia-y-m4 (:structural.member/inertia-y-m4 member)
+                   :inertia-z-m4 (:structural.member/inertia-z-m4 member)
+                   :up-vector (:structural.member/up-vector member)
+                   :release-start (:structural.member/release-start member)
+                   :release-end (:structural.member/release-end member)})
+                (:structural/members model))
+          :load-case
+          {:nodal-loads (:structural.load-case/nodal-loads load-case)
+           :member-loads
+           (mapv (fn [load]
+                   {:member (:member load)
+                    :qx (+ (or (:qx load) 0.0) (or (:wx load) 0.0))
+                    :qy (+ (or (:qy load) 0.0) (or (:wy load) 0.0))
+                    :qz (+ (or (:qz load) 0.0) (or (:wz load) 0.0))})
+                 (:structural.load-case/member-loads load-case))}})
+        nodes (:structural.frame-3d/nodes frame)
+        members
+        (into {}
+              (map (fn [[id result]]
+                     (let [forces (:local-end-forces result)]
+                       [id (assoc result :force-n (* 0.5 (- (:n2 forces) (:n1 forces)))
+                                  :max-shear-n (max (math-abs (:vy1 forces))
+                                                    (math-abs (:vz1 forces))
+                                                    (math-abs (:vy2 forces))
+                                                    (math-abs (:vz2 forces)))
+                                  :max-moment-nm (max (math-abs (:my1 forces))
+                                                      (math-abs (:mz1 forces))
+                                                      (math-abs (:my2 forces))
+                                                      (math-abs (:mz2 forces))))]))
+                   (:structural.frame-3d/members frame)))]
+    {:structural.analysis/load-case load-case-id
+     :structural.analysis/kind :frame-3d :structural.analysis/dimension 3
+     :structural.analysis/displacements
+     (into {} (map (fn [[id value]]
+                     [id [(:ux value) (:uy value) (:uz value)
+                          (:rx value) (:ry value) (:rz value)]]) nodes))
+     :structural.analysis/reactions
+     (into {} (map (fn [[id value]]
+                     [id [(:rfx value) (:rfy value) (:rfz value)
+                          (:rmx value) (:rmy value) (:rmz value)]]) nodes))
+     :structural.analysis/member-results members
+     :structural.analysis/member-axial-forces
+     (into {} (map (fn [[id result]] [id (:force-n result)]) members))}))
+
+(defn analyze-3d-frame-combination
+  "Linearly combine canonical 3D frame load-case results."
+  [model combination-id]
+  (let [combination (or (first (filter #(= combination-id (:structural.combination/id %))
+                                       (:structural/combinations model)))
+                        (throw (ex-info "structural load combination not found"
+                                        {:combination-id combination-id})))
+        factors (:structural.combination/factors combination)
+        results (into {} (map (fn [case-id]
+                                [case-id (analyze-3d-frame-model model case-id)])
+                              (keys factors)))
+        combined (:structural.combination/result
+                  (structural/combine-results combination-id results factors))]
+    (assoc combined :structural.analysis/load-case nil
+                    :structural.analysis/combination combination-id)))
 
 (defn analyze-structural-combination
   "Analyze a factored load combination and check axial member resistance."
