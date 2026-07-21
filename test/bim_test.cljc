@@ -2015,6 +2015,8 @@
     (is (re-find #"class=\"opening\"" plan-svg))
     (is (re-find #"class=\"element-tag\"" plan-svg))
     (is (re-find #"class=\"cut-element\"" section-svg))
+    (is (re-find #"class=\"section-cut-edges\"" section-svg))
+    (is (re-find #"class=\"section-cut-edge\"" section-svg))
     (is (re-find #"class=\"projected-element\"" section-svg))
     (is (re-find #"data-view-kind=\"elevation\"" elevation))
     (is (= 3 (:schedule/total-count schedule)))
