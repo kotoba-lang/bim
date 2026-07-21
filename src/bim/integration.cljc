@@ -865,6 +865,45 @@
        (filter #(and (map? %) (:family/shared? %) (:family/id %)))
        (mapv #(dissoc % :family/shared-instances))))
 
+(defn- ifc-family-property [spec value]
+  {:kind :single :value value
+   :value-type (case (:type spec)
+                 :boolean :ifcboolean :integer :ifcinteger
+                 :length :ifclengthmeasure
+                 (:angle :area :volume :number) :ifcreal
+                 :ifclabel)})
+
+(defn- family-type-property-set [family type-key params]
+  (let [specs (:family/parameters family)
+        type-parameters (filter (fn [[name _]] (= :type (get-in specs [name :scope])))
+                                params)]
+    {:name "Pset_KotobaFamilyType"
+     :properties
+     (into {"FamilyId" {:kind :single :value (:family/id family)
+                         :value-type :ifclabel}
+            "TypeKey" {:kind :single :value (name type-key) :value-type :ifclabel}}
+           (map (fn [[parameter value]]
+                  [(str "Parameter__" (name parameter))
+                   (ifc-family-property (get specs parameter) value)]))
+           type-parameters)}))
+
+(defn- family-instance-property-set [family type-key params]
+  (let [specs (:family/parameters family)
+        instance-parameters
+        (remove (fn [[name _]] (= :type (get-in specs [name :scope]))) params)]
+    (bim/property-set
+     "Pset_KotobaFamilyInstance"
+     (into (cond-> {:FamilyId (bim/text-value (:family/id family))}
+             type-key (assoc :TypeKey (bim/text-value (name type-key))))
+           (map (fn [[parameter value]]
+                  [(keyword (str "Parameter__" (name parameter)))
+                   (case (:type (get specs parameter))
+                     :boolean (bim/bool-value value)
+                     :integer (bim/int-value value)
+                     (:length :angle :area :volume :number) (bim/real-value value)
+                     (bim/text-value (str value)))])
+                instance-parameters)))))
+
 (defn- instantiate-family* [catalog family type-key instance-id overrides stack context]
   (let [params (resolve-family-parameters family type-key overrides (some? catalog))
         planes (resolve-reference-planes family params)
@@ -889,7 +928,9 @@
                                       :else %)
                                    (:family/template family))
         body (-> (materialize-template catalog substituted stack context)
-                 (apply-family-presentation context))
+                 (apply-family-presentation context)
+                 (update :psets #(assoc (or % {}) "Pset_KotobaFamilyInstance"
+                                        (family-instance-property-set family type-key params))))
         type-spec (get-in family [:family/types type-key])]
     (cond-> (assoc body :id instance-id
                         :family/id (:family/id family)
@@ -905,7 +946,10 @@
                         :global-id (:global-id type-spec)
                         :name (or (:name type-spec) (name type-key))
                         :element-type (:family/name family)
-                        :predefined-type (:predefined-type type-spec)}))))
+                        :predefined-type (:predefined-type type-spec)
+                        :property-sets
+                        {"Pset_KotobaFamilyType"
+                         (family-type-property-set family type-key params)}}))))
 
 (defn instantiate-family
   "Materialize a serializable family template. A value shaped as [:param :x]
@@ -1821,6 +1865,27 @@
    :connector/system-type (:system-type port)
    :connector/connected-to connected-port})
 
+(defn- ifc-family-parameter-values [property-set]
+  (into {}
+        (keep (fn [[property-name property]]
+                (when (string/starts-with? property-name "Parameter__")
+                  [(keyword (subs property-name (count "Parameter__")))
+                   (:value property)])))
+        (:properties property-set)))
+
+(defn- imported-family-metadata [source]
+  (let [instance-set (get-in source [:property-sets "Pset_KotobaFamilyInstance"])
+        type-set (get-in source [:type-object :property-sets "Pset_KotobaFamilyType"])
+        family-id (or (get-in instance-set [:properties "FamilyId" :value])
+                      (get-in type-set [:properties "FamilyId" :value]))
+        type-key (or (get-in instance-set [:properties "TypeKey" :value])
+                     (get-in type-set [:properties "TypeKey" :value]))]
+    (when family-id
+      {:family/id family-id
+       :family/type (some-> type-key keyword)
+       :family/parameters (merge (ifc-family-parameter-values type-set)
+                                 (ifc-family-parameter-values instance-set))})))
+
 (defn- imported-element [source connected-port-by-id]
   (let [[x y z] (get-in source [:placement :location] [0.0 0.0 0.0])
         origin [x y z]
@@ -1854,7 +1919,8 @@
                                 :geometry geometry}))
           (bim/element {:id (:id source) :kind (if (= :proxy (:kind source)) :other (:kind source)) :name (:name source)
                         :placement (:placement source) :geometry geometry}))]
-    (assoc result :global-id (:global-id source) :ifc/source-id (:id source)
+    (merge
+     (assoc result :global-id (:global-id source) :ifc/source-id (:id source)
                   :ifc/kind (:kind source)
                   :type-object (:type-object source)
                   :ifc/property-sets (:property-sets source)
@@ -1872,7 +1938,8 @@
                   :classification (or classification (:classification result))
                   :openings (if (= :slab (:kind source))
                               (imported-slab-openings source) (:openings result))
-                  :psets (merge (:psets result) psets))))
+                  :psets (merge (:psets result) psets))
+     (imported-family-metadata source))))
 
 (defn- imported-unit-system [document]
   (let [{:keys [name prefix]} (get-in document [:ifc/units :lengthunit])

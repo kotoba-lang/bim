@@ -330,6 +330,31 @@
                           (integration/instantiate-family-type catalog "cabinet" :wide 71
                                                                {:width 1.5})))))
 
+(deftest family-and-type-parameters-round-trip-through-ifc-type-objects
+  (let [family (integration/family-definition
+                {:id "ifc-door-family" :name "IFC Door Family" :category :door
+                 :parameters {:width {:type :length :scope :type :default 0.9}
+                              :height {:type :length :scope :instance :default 2.1}}
+                 :types {:wide {:id "ifc-door-wide" :global-id "door-type-guid"
+                                :name "Wide Door" :parameters {:width 1.2}
+                                :predefined-type :door}}
+                 :template {:kind :door :name "Family Door" :geometry nil}})
+        instance (integration/instantiate-family-type
+                  (integration/family-catalog [family]) "ifc-door-family" :wide 74
+                  {:height 2.4})
+        project (bim/add-element (integrated-project) 3 instance)
+        imported (integration/import-ifc-spf (ifc/write-standard-spf project))
+        restored (first (filter #(= "Family Door" (:name %))
+                                (get-in imported [:sites 0 :buildings 0 :storeys 0
+                                                  :elements])))]
+    (is (= "ifc-door-family" (:family/id restored)))
+    (is (= :wide (:family/type restored)))
+    (is (= 1.2 (get-in restored [:family/parameters :width])))
+    (is (= 2.4 (get-in restored [:family/parameters :height])))
+    (is (= "ifc-door-family"
+           (get-in restored [:type-object :property-sets "Pset_KotobaFamilyType"
+                             :properties "FamilyId" :value])))))
+
 (deftest family-conditional-scientific-and-visibility-formulas
   (let [family (integration/family-definition
                 {:id "parametric-panel" :name "Parametric Panel" :category :furniture
