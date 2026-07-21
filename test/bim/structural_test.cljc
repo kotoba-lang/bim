@@ -2,6 +2,24 @@
   (:require [clojure.test :refer [deftest is]]
             [bim.structural :as structural]))
 
+(deftest combines-and-envelopes-structural-results
+  (let [dead {:nodes {:n1 {:ux 1.0 :reaction -10.0}}
+              :members {:m1 {:moment [2.0 -3.0]}}}
+        live {:nodes {:n1 {:ux -2.0 :reaction -4.0}}
+              :members {:m1 {:moment [5.0 1.0]}}}
+        results {:dead dead :live live}
+        combination (structural/combine-results :uls results {:dead 1.35 :live 1.5})
+        envelope (structural/result-envelope results)]
+    (is (= -1.65 (get-in combination
+                          [:structural.combination/result :nodes :n1 :ux])))
+    (is (= -19.5 (get-in combination
+                          [:structural.combination/result :nodes :n1 :reaction])))
+    (is (= {:min -2.0 :min-case :live :max 1.0 :max-case :dead}
+           (get-in envelope [:structural.envelope/by-path [:nodes :n1 :ux]])))
+    (is (= :live
+           (get-in envelope
+                   [:structural.envelope/by-path [:members :m1 :moment 0] :max-case])))))
+
 (deftest shell-area-and-load-distribution
   (let [shell (structural/shell-element
                {:id :s1 :nodes [[0 0 0] [4 0 0] [4 3 0] [0 3 0]]
