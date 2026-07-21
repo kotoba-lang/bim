@@ -252,6 +252,88 @@
        :mep.assembly/fittings (vec (sort-by (comp str :mep/node-id) (vals fittings)))
        :mep.assembly/open-connectors open-connectors})))
 
+(defn fluid-section
+  "Return flow area and hydraulic diameter for round pipe or rectangular duct."
+  [{:keys [shape diameter-m width-m height-m] :as section}]
+  (let [[area hydraulic-diameter]
+        (case shape
+          :round (when (and (number? diameter-m) (pos? diameter-m))
+                   [(* pi diameter-m diameter-m 0.25) diameter-m])
+          :rectangular
+          (when (and (number? width-m) (pos? width-m)
+                     (number? height-m) (pos? height-m))
+            (let [area (* width-m height-m)]
+              [area (/ (* 2.0 width-m height-m) (+ width-m height-m))]))
+          nil)]
+    (when-not (and area (pos? area) (pos? hydraulic-diameter))
+      (throw (ex-info "fluid section requires a positive round or rectangular size"
+                      {:section section})))
+    {:fluid/area-m2 area :fluid/hydraulic-diameter-m hydraulic-diameter}))
+
+(defn analyze-fluid-route
+  "Darcy-Weisbach pressure analysis for a pipe/duct route. Each segment supplies
+  length-m and may override section, flow-rate-m3-s, friction-factor and
+  fitting-loss-coefficient. Results retain per-segment velocity and losses."
+  [{:keys [segments section flow-rate-m3-s density-kg-m3 friction-factor
+           max-velocity-m-s max-pressure-loss-pa]
+    :or {density-kg-m3 1.204 friction-factor 0.02}}]
+  (when-not (and (seq segments) (number? flow-rate-m3-s) (pos? flow-rate-m3-s)
+                 (number? density-kg-m3) (pos? density-kg-m3)
+                 (number? friction-factor) (pos? friction-factor))
+    (throw (ex-info "fluid route requires segments, positive flow, density, and friction"
+                    {:flow-rate-m3-s flow-rate-m3-s})))
+  (let [results
+        (mapv (fn [{:keys [length-m fitting-loss-coefficient] :as segment}]
+                (when-not (and (number? length-m) (not (neg? length-m)))
+                  (throw (ex-info "fluid segment length must be non-negative"
+                                  {:segment segment})))
+                (let [{:fluid/keys [area-m2 hydraulic-diameter-m]}
+                      (fluid-section (merge section (:section segment)))
+                      flow (or (:flow-rate-m3-s segment) flow-rate-m3-s)
+                      factor (or (:friction-factor segment) friction-factor)
+                      velocity (/ flow area-m2)
+                      dynamic-pressure (* 0.5 density-kg-m3 velocity velocity)
+                      friction-loss (* factor (/ length-m hydraulic-diameter-m)
+                                       dynamic-pressure)
+                      fitting-loss (* (or fitting-loss-coefficient 0.0)
+                                      dynamic-pressure)]
+                  (assoc segment :fluid/flow-rate-m3-s flow
+                         :fluid/velocity-m-s velocity
+                         :fluid/dynamic-pressure-pa dynamic-pressure
+                         :fluid/friction-loss-pa friction-loss
+                         :fluid/fitting-loss-pa fitting-loss
+                         :fluid/pressure-loss-pa (+ friction-loss fitting-loss))))
+              segments)
+        total (reduce + (map :fluid/pressure-loss-pa results))
+        peak (reduce max 0.0 (map :fluid/velocity-m-s results))
+        issues (cond-> []
+                 (and max-velocity-m-s (> peak max-velocity-m-s))
+                 (conj {:issue :velocity-exceeded :actual peak :limit max-velocity-m-s})
+                 (and max-pressure-loss-pa (> total max-pressure-loss-pa))
+                 (conj {:issue :pressure-loss-exceeded :actual total
+                        :limit max-pressure-loss-pa}))]
+    {:fluid/segments results :fluid/total-pressure-loss-pa total
+     :fluid/peak-velocity-m-s peak :fluid/issues issues}))
+
+(defn select-fluid-section
+  "Select the smallest catalog section satisfying velocity and total pressure
+  limits. Catalog entries contain :section plus stable identifying metadata."
+  [route catalog {:keys [max-velocity-m-s max-pressure-loss-pa]}]
+  (or
+   (first
+    (keep (fn [entry]
+            (let [analysis (analyze-fluid-route
+                            (assoc route :section (:section entry)
+                                   :max-velocity-m-s max-velocity-m-s
+                                   :max-pressure-loss-pa max-pressure-loss-pa))]
+              (when (empty? (:fluid/issues analysis))
+                {:fluid.selection/catalog-entry entry
+                 :fluid.selection/analysis analysis})))
+          (sort-by #(-> % :section fluid-section :fluid/area-m2) catalog)))
+   (throw (ex-info "no fluid section satisfies design limits"
+                   {:max-velocity-m-s max-velocity-m-s
+                    :max-pressure-loss-pa max-pressure-loss-pa}))))
+
 (defn electrical-circuit
   [{:keys [id name apparent-power-va voltage-v power-factor poles phase
            length-m conductor-area-mm2]}]
