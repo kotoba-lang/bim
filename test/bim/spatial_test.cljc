@@ -26,3 +26,44 @@
   (let [bounds {:min [0 0 0] :max [2 2 2]}]
     (is (= :full (:lod/level (spatial/choose-lod bounds [1 1 5] 1000 {}))))
     (is (= :bounds (:lod/level (spatial/choose-lod bounds [1 1 1000] 1000 {}))))))
+
+(deftest incremental-index-and-resident-stream-cache
+  (let [elements (mapv (fn [id]
+                         {:id id :spatial/bounds
+                          {:min [(* id 2.0) 0.0 0.0]
+                           :max [(+ (* id 2.0) 1.0) 1.0 1.0]}})
+                       (range 30))
+        index (spatial/build-index elements {:cell-size 5.0})
+        moved (assoc (nth elements 3) :spatial/bounds
+                     {:min [200.0 0.0 0.0] :max [201.0 1.0 1.0]})
+        updated (-> index (spatial/upsert-element moved)
+                    (spatial/remove-element 4))
+        bounds {:min [0.0 -1.0 -1.0] :max [60.0 2.0 2.0]}
+        plan (spatial/stream-plan updated bounds [0.0 -10.0 5.0] 800.0 8
+                                    {:include-elements? false})
+        first-delta (spatial/stream-delta (spatial/stream-session) plan
+                                          {:max-resident 12 :max-loads 5})
+        second-delta (spatial/stream-delta (:stream/session first-delta) plan
+                                           {:max-resident 12 :max-loads 12})]
+    (is (not (contains? (set (spatial/query-ids updated bounds)) 3)))
+    (is (not (contains? (set (spatial/query-ids updated bounds)) 4)))
+    (is (every? #(not (contains? % :element)) (mapcat :stream/entries plan)))
+    (is (= 5 (count (:stream/load first-delta))))
+    (is (= :loading (:stream/status first-delta)))
+    (is (= :ready (:stream/status second-delta)))
+    (is (= 12 (count (get-in second-delta [:stream/session :stream/resident]))))))
+
+(deftest hundred-thousand-element-metadata-index-culls-without-mesh-realization
+  (let [elements (mapv (fn [id]
+                         (let [x (double (mod id 1000))
+                               y (double (quot id 1000))]
+                           {:id id :spatial/bounds
+                            {:min [x y 0.0] :max [(+ x 0.8) (+ y 0.8) 3.0]}}))
+                       (range 100000))
+        index (spatial/build-index elements {:cell-size 10.0})
+        report (spatial/query-report
+                index {:min [100.0 20.0 -1.0] :max [109.9 29.9 4.0]})]
+    (is (= 100000 (:spatial/total-elements report)))
+    (is (= 100 (:spatial/returned-elements report)))
+    (is (<= (:spatial/candidate-elements report) 400))
+    (is (> (:spatial/culling-ratio report) 0.99))))
