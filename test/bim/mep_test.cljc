@@ -195,3 +195,56 @@
          (mep/select-protective-device analysis
                                        [{:id :undersized :rating-a 50.0
                                          :breaking-capacity-a 10000.0}])))))
+
+(deftest radial-electrical-distribution-rolls-up-loads-and-coordinates-protection
+  (let [load-circuit
+        (fn [id load]
+          (mep/electrical-circuit
+           {:id id :name (name id) :apparent-power-va load :voltage-v 400.0
+            :power-factor 0.9 :poles 3 :length-m 20.0 :conductor-area-mm2 6.0}))
+        result
+        (mep/analyze-electrical-distribution
+         {:root-panel :main
+          :panels [{:id :main :phases [:l1 :l2 :l3] :line-voltage-v 400.0
+                    :main-rating-a 100.0 :circuits []}
+                   {:id :db1 :phases [:l1 :l2 :l3] :line-voltage-v 400.0
+                    :main-rating-a 63.0 :circuits [(load-circuit :hvac 10000.0)]}
+                   {:id :db2 :phases [:l1 :l2 :l3] :line-voltage-v 400.0
+                    :main-rating-a 32.0 :circuits [(load-circuit :lighting 5000.0)]}]
+          :feeders [{:id :f1 :from :main :to :db1 :phases 3 :power-factor 0.9
+                     :length-m 30.0 :resistance-ohm-m 0.0004
+                     :reactance-ohm-m 0.00008 :source-resistance-ohm 0.01
+                     :source-reactance-ohm 0.02 :cable-ampacity-a 63.0}
+                    {:id :f2 :from :db1 :to :db2 :phases 3 :power-factor 0.9
+                     :length-m 20.0 :resistance-ohm-m 0.0007
+                     :reactance-ohm-m 0.00008 :cable-ampacity-a 32.0}]
+          :protective-device-catalog
+          [{:id :mccb-10 :rating-a 10.0 :breaking-capacity-a 20000.0
+            :instantaneous-trip-multiple 5.0}
+           {:id :mccb-25-selective :rating-a 25.0 :breaking-capacity-a 20000.0
+            :instantaneous-trip-multiple 5.0 :selective-delay? true}
+           {:id :mccb-40 :rating-a 40.0 :breaking-capacity-a 20000.0
+            :instantaneous-trip-multiple 5.0}]})]
+    (is (= 15000.0 (:electrical.distribution/total-load-va result)))
+    (is (= 15000.0 (get-in result [:electrical.distribution/panels :db1
+                                   :panel/downstream-load-va])))
+    (is (= :three-phase
+           (get-in result [:electrical.distribution/panels :db1
+                           :panel/assignments :hvac])))
+    (is (= :mccb-25-selective
+           (get-in result [:electrical.distribution/feeders :f1
+                           :electrical.distribution/protection
+                           :electrical.protection/device :id])))
+    (is (= :mccb-10
+           (get-in result [:electrical.distribution/feeders :f2
+                           :electrical.distribution/protection
+                           :electrical.protection/device :id])))
+    (is (> (get-in result [:electrical.distribution/feeders :f2
+                           :electrical.distribution/analysis
+                           :electrical.feeder/fault-resistance-ohm])
+           (get-in result [:electrical.distribution/feeders :f1
+                           :electrical.distribution/analysis
+                           :electrical.feeder/fault-resistance-ohm])))
+    (is (true? (get-in result [:electrical.distribution/coordinations :f2
+                               :electrical.coordination/coordinated?])))
+    (is (empty? (:electrical.distribution/issues result)))))

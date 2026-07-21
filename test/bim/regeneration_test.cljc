@@ -22,7 +22,8 @@
   (let [first-run (regeneration/regenerate {:project (project-with-wall 6)})
         reused (regeneration/regenerate {:project (project-with-wall 6)} first-run)
         changed (regeneration/regenerate {:project (project-with-wall 9)} reused)]
-    (is (= #{:structural/model :structural/results :mep/designs :coordinated/project
+    (is (= #{:structural/model :structural/results :mep/designs
+             :electrical/distribution :coordinated/project
              :drawing/set :ifc/document :ifc/spf}
            (:artifact.graph/rebuilt first-run)))
     (is (empty? (:artifact.graph/rebuilt reused)))
