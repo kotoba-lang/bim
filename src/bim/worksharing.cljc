@@ -157,7 +157,9 @@
                         :revision (:revision entry) :actor (:actor entry)}))]
       (if (seq conflicts)
         {:worksharing/status :conflict :worksharing/workspace state
-         :worksharing/conflicts conflicts}
+         :worksharing/conflicts conflicts
+         :worksharing/pending {:actor actor :base-revision base-revision
+                               :submitted-at now :transaction transaction}}
         (let [next-revision (inc (:worksharing/revision state))
               next-state (-> state
                              (update :worksharing/editor editor/transact transaction)
@@ -170,6 +172,73 @@
                                       :timestamp now}))]
           {:worksharing/status :applied :worksharing/workspace next-state
            :worksharing/revision next-revision})))))))
+
+(defn resolve-conflict
+  "Resolve every incoming conflict from `submit` and commit the result at the
+  current head. A resolution is `{:path p :strategy :incoming|:current}` or
+  `{:path p :strategy :value :value v}`. Non-conflicting operations are always
+  retained and the chosen resolutions are recorded in revision history."
+  [conflict-result actor now resolutions]
+  (when-not (= :conflict (:worksharing/status conflict-result))
+    (throw (ex-info "worksharing result has no conflict"
+                    {:status (:worksharing/status conflict-result)})))
+  (let [state (:worksharing/workspace conflict-result)
+        pending (:worksharing/pending conflict-result)
+        transaction (:transaction pending)
+        conflict-paths (set (map (comp vec :incoming-path)
+                                 (:worksharing/conflicts conflict-result)))
+        resolution-by-path (into {} (map (juxt (comp vec :path) identity) resolutions))]
+    (when-not (= actor (:actor pending))
+      (throw (ex-info "only the pending transaction actor can resolve its conflict"
+                      {:actor actor :pending-actor (:actor pending)})))
+    (when-not (capability? state actor :edit)
+      (throw (ex-info "actor is not authorized to edit" {:actor actor})))
+    (when-not (= conflict-paths (set (keys resolution-by-path)))
+      (throw (ex-info "every worksharing conflict needs exactly one resolution"
+                      {:expected conflict-paths :actual (set (keys resolution-by-path))})))
+    (doseq [[path resolution] resolution-by-path]
+      (when-not (contains? #{:incoming :current :value} (:strategy resolution))
+        (throw (ex-info "unsupported worksharing conflict resolution"
+                        {:path path :strategy (:strategy resolution)}))))
+    (let [element-ids (set (:transaction/element-ids transaction))
+          invalid-leases
+          (filterv (fn [element-id]
+                     (let [lease (get-in state [:worksharing/leases element-id])]
+                       (not (and (= actor (:lease/actor lease))
+                                 (> (:lease/expires-at lease 0) now)))))
+                   element-ids)]
+      (when (seq invalid-leases)
+        (throw (ex-info "conflict resolution requires active element leases"
+                        {:actor actor :element-ids invalid-leases})))
+      (let [operations
+            (vec
+             (keep (fn [operation]
+                     (if-let [{:keys [strategy value]}
+                              (resolution-by-path (vec (:path operation)))]
+                       (case strategy
+                         :incoming operation
+                         :current nil
+                         :value (assoc operation :op :set :value value))
+                       operation))
+                   (:operations transaction)))
+            resolved-transaction (assoc transaction :operations operations)
+            next-revision (inc (:worksharing/revision state))
+            next-state
+            (cond-> state
+              (seq operations) (update :worksharing/editor editor/transact
+                                       resolved-transaction)
+              true (assoc :worksharing/revision next-revision)
+              true (update :worksharing/history conj
+                           {:revision next-revision
+                            :base-revision (:base-revision pending)
+                            :resolved-at-revision (:worksharing/revision state)
+                            :actor actor :transaction/id (:id transaction)
+                            :transaction resolved-transaction :element-ids element-ids
+                            :paths (mapv :path operations) :timestamp now
+                            :conflict/resolutions (vec resolutions)}))]
+        {:worksharing/status :resolved :worksharing/workspace next-state
+         :worksharing/revision next-revision
+         :worksharing/resolutions (vec resolutions)}))))
 
 (defn changes-since
   "Return an ordered replay delta after a durable workspace revision."
