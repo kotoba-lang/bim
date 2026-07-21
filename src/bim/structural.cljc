@@ -426,3 +426,60 @@
        :structural.plane-stress/elements element-results
        :structural.plane-stress/displacements displacements
        :structural.plane-stress/reactions reactions})))
+
+(defn- numeric-leaves
+  ([value] (numeric-leaves [] value))
+  ([path value]
+   (cond
+     (number? value) [[path value]]
+     (map? value) (mapcat (fn [[key child]] (numeric-leaves (conj path key) child)) value)
+     (vector? value) (mapcat (fn [index child]
+                               (numeric-leaves (conj path index) child))
+                             (range) value)
+     :else [])))
+
+(defn combine-results
+  "Apply a linear load combination to compatible frame or plane-stress result
+  trees. Numeric leaves are combined; semantic ids and result structure come
+  from the first referenced case."
+  [combination-id results-by-case factors]
+  (when-not (and combination-id (seq factors)
+                 (every? #(contains? results-by-case %) (keys factors))
+                 (every? number? (vals factors)))
+    (throw (ex-info "structural combination requires known cases and numeric factors"
+                    {:combination-id combination-id :factors factors})))
+  (let [cases (mapv results-by-case (keys factors))
+        paths (into #{} (mapcat #(map first (numeric-leaves %))) cases)
+        combined
+        (reduce (fn [result path]
+                  (assoc-in result path
+                            (reduce-kv (fn [sum case-id factor]
+                                         (+ sum (* factor
+                                                   (double (or (get-in (get results-by-case
+                                                                            case-id) path)
+                                                               0.0)))))
+                                       0.0 factors)))
+                (first cases) paths)]
+    {:structural.combination/id combination-id
+     :structural.combination/factors factors
+     :structural.combination/result combined}))
+
+(defn result-envelope
+  "Return min/max values and governing case ids for every numeric result path."
+  [results-by-case]
+  (when-not (seq results-by-case)
+    (throw (ex-info "structural result envelope requires cases" {})))
+  (let [paths (into #{} (mapcat #(map first (numeric-leaves %)) (vals results-by-case)))]
+    {:structural.envelope/cases (vec (keys results-by-case))
+     :structural.envelope/by-path
+     (into {}
+           (map (fn [path]
+                  (let [values (keep (fn [[case-id result]]
+                                       (when-let [value (get-in result path)]
+                                         (when (number? value) [case-id value])))
+                                     results-by-case)
+                        minimum (apply min-key second values)
+                        maximum (apply max-key second values)]
+                    [path {:min (second minimum) :min-case (first minimum)
+                           :max (second maximum) :max-case (first maximum)}])))
+           paths)}))
