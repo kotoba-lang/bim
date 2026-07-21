@@ -1297,6 +1297,11 @@
                          [:ifc/elements 0 :openings 0 :filled-by-global-id])))
     (is (= "EPSG:6677" (get-in standard-document
                                 [:ifc/georeference :projected-crs :name])))
+    (is (= [500101.0 3950202.0 45.5]
+           (integration/model-to-map-coordinate project [1.0 2.0 3.0])))
+    (is (= [1.0 2.0 3.0]
+           (integration/map-to-model-coordinate project
+                                                [500101.0 3950202.0 45.5])))
     (is (= [100.0 200.0 0.0] (:world-origin imported-project)))
     (is (= 0.0 (:true-north-rad imported-project)))
     (is (< (#?(:clj Math/abs :cljs js/Math.abs)
