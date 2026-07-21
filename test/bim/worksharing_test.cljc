@@ -25,6 +25,14 @@
                   state-b "alice" 0 112
                   {:id "tx-c" :transaction/element-ids [10]
                    :operations [{:op :set :path [:elements 10 :name] :value "Wall C"}]})
+        resolved-incoming
+        (worksharing/resolve-conflict
+         conflict "alice" 113
+         [{:path [:elements 10 :name] :strategy :incoming}])
+        resolved-current
+        (worksharing/resolve-conflict
+         conflict "alice" 113
+         [{:path [:elements 10 :name] :strategy :current}])
         renewed (worksharing/renew-leases checked-out "alice" [10] 150 60)
         presence (-> initial
                      (worksharing/heartbeat "reviewer" 100
@@ -44,6 +52,16 @@
     (is (= :conflict (:worksharing/status conflict)))
     (is (= [:elements 10 :name]
            (get-in conflict [:worksharing/conflicts 0 :incoming-path])))
+    (is (= :resolved (:worksharing/status resolved-incoming)))
+    (is (= "Wall C" (get-in resolved-incoming
+                             [:worksharing/workspace :worksharing/editor
+                              :editor/document :elements 10 :name])))
+    (is (= "Wall A" (get-in resolved-current
+                             [:worksharing/workspace :worksharing/editor
+                              :editor/document :elements 10 :name])))
+    (is (= :incoming (get-in resolved-incoming
+                             [:worksharing/workspace :worksharing/history 2
+                              :conflict/resolutions 0 :strategy])))
     (is (= 210 (get-in renewed [:worksharing/leases 10 :lease/expires-at])))
     (is (= 150 (get-in renewed [:worksharing/leases 10 :lease/renewed-at])))
     (is (empty? (:worksharing/leases
