@@ -1126,6 +1126,60 @@
     (is (= 2 (count (:mep.analysis/segments analysis))))
     (is (pos? (:mep.analysis/total-pressure-loss-pa analysis)))))
 
+(deftest mep-system-topology-and-port-dimensions-round-trip-through-standard-ifc
+  (let [a-out (integration/mep-connector
+               {:id "0eA6m4fELI9QBIhP3wiLAp" :point [2.0 0.0 0.0]
+                :direction [1.0 0.0 0.0] :domain :piping :shape :round
+                :size 0.1 :flow-direction :out
+                :connected-to "05rScmOVzMoQXOfbYdtLYj"})
+        b-in (integration/mep-connector
+              {:id "05rScmOVzMoQXOfbYdtLYj" :point [2.0 0.0 0.0]
+               :direction [-1.0 0.0 0.0] :domain :piping :shape :round
+               :size 0.1 :flow-direction :in
+               :connected-to "0eA6m4fELI9QBIhP3wiLAp"})
+        pipe-a (assoc (integration/mep-segment
+                       {:id :pipe-a :kind :pipe :start [0.0 0.0 0.0]
+                        :end [2.0 0.0 0.0] :diameter 0.1 :system-id :chw
+                        :connectors [a-out]})
+                      :global-id "3b0AoFivPN6RDJO6UL_GfZ")
+        pipe-b (assoc (integration/mep-segment
+                       {:id :pipe-b :kind :pipe :start [2.0 0.0 0.0]
+                        :end [5.0 0.0 0.0] :diameter 0.1 :system-id :chw
+                        :connectors [b-in]})
+                      :global-id "1wmyFZ7pv7MghF0F$h9xDR")
+        storey (assoc (bim/storey {:id :l1 :name "L1" :elevation 0.0 :height 3.0
+                                   :placement :identity :spaces []
+                                   :elements [pipe-a pipe-b]})
+                      :global-id "2nJrDaLQfJ1QPhdJR0o97J")
+        building (assoc (bim/building {:id :building :name "Building"
+                                       :placement :identity :reference-elevation 0.0
+                                       :storeys [storey]})
+                        :global-id "2m6JtV3Mn2T8sN5eN0hTtR")
+        site (assoc (bim/site {:id :site :name "Site" :placement :identity
+                               :buildings [building]})
+                    :global-id "37cSLEVEb6YQZVfLRW1MSY")
+        system (integration/mep-system
+                {:id :chw :name "Chilled water" :kind :hydronic
+                 :medium :chilled-water :design-flow 0.012
+                 :segments [pipe-a pipe-b]})
+        project (assoc (update (bim/project "MEP IFC") :sites conj site)
+                       :mep/systems [system])
+        spf (ifc/write-standard-spf project)
+        imported (integration/import-ifc-spf spf)
+        imported-system (first (:mep/systems imported))
+        imported-connectors (mapcat :mep/connectors
+                                    (:mep/segments imported-system))]
+    (is (string/includes? spf "IFCDISTRIBUTIONSYSTEM"))
+    (is (string/includes? spf "IFCRELSERVICESBUILDINGS"))
+    (is (= :chilledwater (:mep/predefined-type imported-system)))
+    (is (= :hydronic (:mep/kind imported-system)))
+    (is (= :chilled-water (:mep/medium imported-system)))
+    (is (= 0.012 (:mep/design-flow imported-system)))
+    (is (= 2 (count (:mep/segments imported-system))))
+    (is (= #{0.1} (set (map :connector/size imported-connectors))))
+    (is (= #{"0eA6m4fELI9QBIhP3wiLAp" "05rScmOVzMoQXOfbYdtLYj"}
+           (set (map :connector/connected-to imported-connectors))))))
+
 (deftest applies-constant-gravity-slope-to-routed-mep-paths
   (let [graded (integration/grade-mep-route
                 [[0 0 3] [3 0 3] [3 4 3] [6 4 3]] 0.02)]

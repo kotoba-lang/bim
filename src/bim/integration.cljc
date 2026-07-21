@@ -1662,13 +1662,37 @@
         :electrical :cable :cable :cable :notdefined))
 
 (defn- exported-port [connector]
-  {:id (:connector/id connector) :global-id (str (:connector/id connector))
-   :name (or (:connector/name connector) (str (:connector/id connector)))
-   :placement {:location (:connector/point connector)
-               :axis (or (:connector/direction connector) [0.0 0.0 1.0])}
-   :flow-direction (connector-flow->ifc (:connector/flow-direction connector))
-   :predefined-type (connector-domain->port-type (:connector/domain connector))
-   :system-type (or (:connector/system-type connector) :notdefined)})
+  (let [size (:connector/size connector)
+        [width height] (when (sequential? size) size)
+        diameter (when (number? size) size)]
+    {:id (:connector/id connector) :global-id (str (:connector/id connector))
+     :name (or (:connector/name connector) (str (:connector/id connector)))
+     :placement {:location (:connector/point connector)
+                 :axis (or (:connector/direction connector) [0.0 0.0 1.0])}
+     :flow-direction (connector-flow->ifc (:connector/flow-direction connector))
+     :predefined-type (connector-domain->port-type (:connector/domain connector))
+     :system-type (or (:connector/system-type connector) :notdefined)
+     :property-sets
+     {"Pset_KotobaConnector"
+      {:properties
+       (cond-> {}
+         (:connector/domain connector)
+         (assoc "Domain" {:kind :single :value (name (:connector/domain connector))
+                          :value-type :ifclabel})
+         (:connector/shape connector)
+         (assoc "Shape" {:kind :single :value (name (:connector/shape connector))
+                         :value-type :ifclabel})
+         diameter (assoc "Diameter"
+                         {:kind :single :value diameter
+                          :value-type :ifclengthmeasure})
+         width (assoc "Width" {:kind :single :value width
+                                :value-type :ifclengthmeasure})
+         height (assoc "Height" {:kind :single :value height
+                                  :value-type :ifclengthmeasure})
+         (:connector/flow-m3-s connector)
+         (assoc "FlowRate"
+                {:kind :single :value (:connector/flow-m3-s connector)
+                 :value-type :ifcvolumetricflowratemeasure}))}}}))
 
 (defn- exported-element [storey element]
   {:id (:id element) :global-id (or (:global-id element) (str (:id element)))
@@ -1699,6 +1723,54 @@
                       :relating-port-global-id (str source)
                       :related-port-global-id (str target)}))))
          vec)))
+
+(defn- mep-system-predefined-type [system]
+  (or (:mep/predefined-type system)
+      (case (:mep/kind system)
+        :hvac (if (= :air (:mep/medium system)) :ventilation :airconditioning)
+        :hydronic (if (= :chilled-water (:mep/medium system)) :chilledwater :heating)
+        :electrical :electrical
+        :lighting :lighting
+        :plumbing :watersupply
+        :sanitary :drainage
+        :stormwater :stormwater
+        :fire-protection :fireprotection
+        :data :data
+        :communication :communication
+        :notdefined)))
+
+(defn- exported-mep-groups [project elements]
+  (let [buildings (mapcat :buildings (:sites project))]
+    (mapv
+     (fn [system]
+       (let [system-id (:mep/id system)
+             members (filter #(= system-id (:mep/system-id %)) elements)]
+         {:id system-id :global-id (str system-id) :kind :distribution-system
+          :name (:mep/name system) :description (:mep/description system)
+          :long-name (:mep/long-name system)
+          :predefined-type (mep-system-predefined-type system)
+          :property-sets
+          {"Pset_KotobaMEPSystem"
+           {:properties
+            (cond-> {}
+              (:mep/kind system)
+              (assoc "Kind" {:kind :single :value (name (:mep/kind system))
+                             :value-type :ifclabel})
+              (:mep/medium system)
+              (assoc "Medium" {:kind :single :value (name (:mep/medium system))
+                               :value-type :ifclabel})
+              (:mep/design-flow system)
+              (assoc "DesignFlow"
+                     {:kind :single :value (:mep/design-flow system)
+                      :value-type :ifcvolumetricflowratemeasure}))}}
+          :member-global-ids
+          (vec (mapcat (fn [element]
+                         (cons (str (or (:global-id element) (:id element)))
+                               (map (comp str :connector/id) (:mep/connectors element))))
+                       members))
+          :services-spatial-ids (vec (map :id buildings))
+          :services-spatial-global-ids (vec (keep :global-id buildings))}))
+     (:mep/systems project))))
 
 (defn- decimal-degrees->compound [value]
   (when (number? value)
@@ -1772,8 +1844,13 @@
                    (when-let [model (:structural/model project)]
                      (export-structural-analysis model))})
         exchange (assoc exchange
-                        :ifc/groups (vec (or (:ifc/groups project)
-                                             (:ifc/groups source)))
+                        :ifc/groups
+                        (let [existing (vec (or (:ifc/groups project)
+                                                (:ifc/groups source)))
+                              generated (exported-mep-groups project model-elements)
+                              generated-ids (set (map :id generated))]
+                          (into generated (remove #(contains? generated-ids (:id %))
+                                                  existing)))
                         :ifc/connections (let [connections (exported-connections model-elements)]
                                            (if (seq connections) connections
                                                (vec (:ifc/connections source)))))]
@@ -1915,13 +1992,23 @@
   (case port-type :duct :hvac :pipe :piping (:cable :cablecarrier) :electrical :other))
 
 (defn- imported-connector [port connected-port]
-  {:connector/id (:global-id port)
-   :connector/point (get-in port [:placement :location] [0.0 0.0 0.0])
-   :connector/direction (get-in port [:placement :axis] [0.0 0.0 1.0])
-   :connector/domain (port-type->connector-domain (:predefined-type port))
-   :connector/flow-direction (ifc-flow->connector (:flow-direction port))
-   :connector/system-type (:system-type port)
-   :connector/connected-to connected-port})
+  (let [properties (get-in port [:property-sets "Pset_KotobaConnector" :properties])
+        value #(get-in properties [% :value])
+        domain (value "Domain") shape (value "Shape")
+        diameter (value "Diameter") width (value "Width") height (value "Height")]
+    (cond->
+     {:connector/id (:global-id port)
+      :connector/point (get-in port [:placement :location] [0.0 0.0 0.0])
+      :connector/direction (get-in port [:placement :axis] [0.0 0.0 1.0])
+      :connector/domain (if (string? domain) (keyword domain)
+                            (port-type->connector-domain (:predefined-type port)))
+      :connector/shape (when (string? shape) (keyword shape))
+      :connector/flow-direction (ifc-flow->connector (:flow-direction port))
+      :connector/system-type (:system-type port)
+      :connector/connected-to connected-port}
+      diameter (assoc :connector/size diameter)
+      (and width height) (assoc :connector/size [width height])
+      (value "FlowRate") (assoc :connector/flow-m3-s (value "FlowRate")))))
 
 (defn- ifc-family-parameter-values [property-set]
   (into {}
@@ -2007,6 +2094,31 @@
                  :else :metre)]
     (bim/unit-system {:length length})))
 
+(defn- imported-mep-systems [groups elements]
+  (let [element-by-global (into {} (map (juxt :global-id identity)) elements)]
+    (mapv
+     (fn [group]
+       (let [properties (get-in group [:property-sets "Pset_KotobaMEPSystem"
+                                       :properties])
+             property #(get-in properties [% :value])
+             members (vec (keep element-by-global (:member-global-ids group)))]
+         {:mep/id (or (:global-id group) (:id group))
+          :mep/name (:name group)
+          :mep/kind (some-> (property "Kind") keyword)
+          :mep/medium (some-> (property "Medium") keyword)
+          :mep/predefined-type (:predefined-type group)
+          :mep/design-flow (property "DesignFlow")
+          :mep/segments (filterv #(contains? #{:mep-segment :duct-segment :pipe-segment}
+                                              (:kind %)) members)
+          :mep/fittings (filterv #(= :flow-fitting (:kind %)) members)
+          :mep/equipment (filterv #(contains? #{:mep-equipment :air-terminal
+                                                :sanitary-terminal :flow-controller
+                                                :flow-moving-device}
+                                              (:kind %)) members)
+          :mep/member-global-ids (:member-global-ids group)
+          :mep/services-spatial-global-ids (:services-spatial-global-ids group)}))
+     (filter #(= :distribution-system (:kind %)) groups))))
+
 (defn import-external-ifc
   "Map a shared IFC exchange document into the BIM spatial hierarchy."
   [document]
@@ -2057,6 +2169,7 @@
                                                                          (:children node)))})
                                    :global-id (:global-id node)))
                                 buildings)
+          imported-elements (vec (mapcat :elements (vals storey-models)))
           site-node (first sites)
           georeference (:ifc/georeference document)
           true-north (:true-north georeference)
@@ -2069,6 +2182,7 @@
        :true-north-rad true-north-rad :ifc/georeference georeference
        :ifc/schema (:ifc/schema document) :ifc/source-document document
        :ifc/groups (:ifc/groups document) :ifc/connections (:ifc/connections document)
+       :mep/systems (imported-mep-systems (:ifc/groups document) imported-elements)
        :psets {}
        :structural/model
        (when-let [structural (:ifc/structural-analysis document)]
