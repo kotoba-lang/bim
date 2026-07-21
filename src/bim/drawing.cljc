@@ -236,6 +236,48 @@
        :vertical [(reduce min vertical) (reduce max vertical)]
        :depth [(reduce min depths) (reduce max depths)]})))
 
+(defn- edge-plane-intersection [a b depth-index cut-position]
+  (let [da (- (nth a depth-index) cut-position)
+        db (- (nth b depth-index) cut-position)
+        tolerance 1.0e-9]
+    (cond
+      (and (< (#?(:clj Math/abs :cljs js/Math.abs) da) tolerance)
+           (< (#?(:clj Math/abs :cljs js/Math.abs) db) tolerance)) [a b]
+      (< (#?(:clj Math/abs :cljs js/Math.abs) da) tolerance) [a]
+      (< (#?(:clj Math/abs :cljs js/Math.abs) db) tolerance) [b]
+      (or (and (neg? da) (pos? db)) (and (pos? da) (neg? db)))
+      (let [factor (/ da (- da db))]
+        [(mapv + a (mapv #(* factor %) (mapv - b a)))])
+      :else [])))
+
+(defn- mesh-section-segments
+  "Intersect indexed mesh triangles with an orthographic section plane and
+  return exact 2D cut segments in model coordinates."
+  [mesh horizontal-index cut-position]
+  (let [positions (:positions mesh)
+        depth-index (if (= horizontal-index 0) 1 0)
+        tolerance 1.0e-9
+        project #(vector (nth % horizontal-index) (nth % 2))]
+    (->> (partition 3 (:indices mesh))
+         (mapcat (fn [[ia ib ic]]
+                   (let [a (nth positions ia) b (nth positions ib) c (nth positions ic)
+                         triangle [a b c]
+                         coplanar? (every?
+                                    #(< (#?(:clj Math/abs :cljs js/Math.abs)
+                                         (- (nth % depth-index) cut-position)) tolerance)
+                                    triangle)]
+                     (if coplanar?
+                       (mapv (fn [[left right]] [(project left) (project right)])
+                             [[a b] [b c] [c a]])
+                       (let [points (->> [[a b] [b c] [c a]]
+                                         (mapcat (fn [[left right]]
+                                                   (edge-plane-intersection
+                                                    left right depth-index cut-position)))
+                                         distinct vec)]
+                         (when (<= 2 (count points))
+                           [[(project (first points)) (project (second points))]]))))))
+         distinct vec)))
+
 (defn orthographic-view
   "Generate a section or elevation from mesh bounds. Sections distinguish cut
   objects from projected objects; elevations emit front-view silhouettes."
@@ -247,8 +289,9 @@
   (let [horizontal-index (if (= axis :x) 0 1)
         entries (keep (fn [element]
                         (when (category-visible? options element)
-                          (when-let [bounds (mesh-projection-bounds element horizontal-index)]
-                            {:element element :bounds bounds})))
+                          (when-let [mesh (bim/element-mesh element)]
+                            (when-let [bounds (mesh-projection-bounds element horizontal-index)]
+                              {:element element :mesh mesh :bounds bounds}))))
                       (all-building-elements building))
         visible (filter (fn [{:keys [bounds]}]
                           (let [[near far] (:depth bounds)]
@@ -293,10 +336,12 @@
             [(shapes/rect 0 0 "100%" "100%" {:fill "white"})
              (shapes/text margin 24 (or title (str (string/capitalize (name kind)) " " (name axis)))
                           {:font-family "sans-serif" :font-size 16})]
-            (for [{:keys [element bounds]} visible
+            (for [{:keys [element mesh bounds]} visible
                   :let [[x0 x1] (:horizontal bounds) [z0 z1] (:vertical bounds)
                         [near far] (:depth bounds)
-                        cut? (and (= kind :section) (<= near cut-position) (<= cut-position far))]]
+                        cut? (and (= kind :section) (<= near cut-position) (<= cut-position far))
+                        cut-segments (when cut?
+                                       (mesh-section-segments mesh horizontal-index cut-position))]]
               [:g {:class (if cut? "cut-element" "projected-element")
                    :data-element-id (:id element)}
                (shapes/rect (sx x0) (sz z1) (max 1 (- (sx x1) (sx x0)))
@@ -308,6 +353,13 @@
                               :stroke-width (if cut? 2 1)
                               :stroke-dasharray (when (and (not cut?) (not hidden-line?))
                                                   "4 3")}))
+               (when (seq cut-segments)
+                 (into [:g {:class "section-cut-edges"}]
+                       (map (fn [[[ax az] [bx bz]]]
+                              (shapes/line (sx ax) (sz az) (sx bx) (sz bz)
+                                           {:class "section-cut-edge" :stroke "#020617"
+                                            :stroke-width 2.5}))
+                            cut-segments)))
                (when show-tags?
                  (shapes/text (/ (+ (sx x0) (sx x1)) 2.0) (- (sz z1) 4)
                               (str (string/upper-case (subs (name (:kind element)) 0 1))
