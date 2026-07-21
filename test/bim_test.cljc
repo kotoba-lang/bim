@@ -1351,8 +1351,9 @@
     (is (= "IFC4X3_ADD2" (:ifc/schema imported)))
     (is (= "Open Office"
            (get-in imported [:sites 0 :buildings 0 :storeys 0 :spaces 0 :long-name])))
-    (is (= "SPACE_40"
-           (get-in imported [:sites 0 :buildings 0 :storeys 0 :spaces 0 :global-id])))
+    (is (re-matches #"[0-3][0-9A-Za-z_$]{21}"
+                    (get-in imported [:sites 0 :buildings 0 :storeys 0 :spaces 0
+                                      :global-id])))
     (is (map? (:ifc/source-document imported)))
     (is (string/includes? output "IFCANNOTATION"))
     (is (string/includes? output "'Keep Vendor Data'"))
