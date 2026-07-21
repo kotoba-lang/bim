@@ -28,6 +28,12 @@
       [:frame-2d true] {(:combination-id request)
                         (integration/analyze-2d-frame-combination
                          model (:combination-id request))}
+      [:frame-3d false] {(:load-case-id request)
+                         (integration/analyze-3d-frame-model
+                          model (:load-case-id request))}
+      [:frame-3d true] {(:combination-id request)
+                        (integration/analyze-3d-frame-combination
+                         model (:combination-id request))}
       (throw (ex-info "unsupported structural analysis request" {:request request})))))
 
 (defn- mep-designs [project requests]
