@@ -66,6 +66,27 @@
     (is (= 0.075 (get-in (last (:mep.assembly/segments assembly))
                           [:geometry :radius])))))
 
+(deftest fluid-route-pressure-loss-and-automatic-sizing
+  (let [route {:flow-rate-m3-s 0.02 :density-kg-m3 998.0 :friction-factor 0.02
+               :segments [{:id :s1 :length-m 20.0}
+                          {:id :s2 :length-m 10.0 :fitting-loss-coefficient 1.5}]}
+        catalog [{:id :dn50 :section {:shape :round :diameter-m 0.05}}
+                 {:id :dn80 :section {:shape :round :diameter-m 0.08}}
+                 {:id :dn100 :section {:shape :round :diameter-m 0.1}}]
+        selected (mep/select-fluid-section
+                  route catalog {:max-velocity-m-s 4.0 :max-pressure-loss-pa 30000.0})
+        analysis (:fluid.selection/analysis selected)]
+    (is (= :dn100 (get-in selected [:fluid.selection/catalog-entry :id])))
+    (is (< (:fluid/peak-velocity-m-s analysis) 4.0))
+    (is (< (:fluid/total-pressure-loss-pa analysis) 30000.0))
+    (is (pos? (get-in analysis [:fluid/segments 1 :fluid/fitting-loss-pa])))
+    (is (= 0.24 (:fluid/area-m2
+                 (mep/fluid-section {:shape :rectangular :width-m 0.8 :height-m 0.3}))))
+    (is (thrown-with-msg? #?(:clj Exception :cljs js/Error) #"no fluid section"
+                          (mep/select-fluid-section
+                           route catalog {:max-velocity-m-s 0.1
+                                          :max-pressure-loss-pa 10.0})))))
+
 (deftest electrical-panel-balances-and-checks-circuits
   (let [circuits [(mep/electrical-circuit
                    {:id :c1 :name "Lighting" :apparent-power-va 2300.0 :voltage-v 230.0
