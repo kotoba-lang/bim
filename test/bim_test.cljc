@@ -1305,6 +1305,38 @@
     (is (= :tee (get-in assembly [:mep.assembly/fittings 0 :mep/fitting-kind])))
     (is (empty? (integration/validate-mep-system system)))))
 
+(deftest authored-mep-network-sizing-updates-geometry-connectors-and-fitting-losses
+  (let [assembly
+        (mep/network-assembly
+         {:id "chw" :system-id :chw :domain :piping :default-size 0.1
+          :nodes {:source {:point [0 0 0]} :tee {:point [4 0 0]}
+                  :terminal-a {:point [8 0 0]} :terminal-b {:point [4 3 1]}}
+          :edges [{:id :main :from :source :to :tee}
+                  {:id :branch-a :from :tee :to :terminal-a}
+                  {:id :branch-b :from :tee :to :terminal-b}]})
+        system (integration/mep-system
+                {:id :chw :name "CHW" :kind :hydronic :medium :water
+                 :segments (:mep.assembly/segments assembly)
+                 :fittings (:mep.assembly/fittings assembly)})
+        design
+        (integration/size-and-balance-authored-mep-system
+         system :source {:terminal-a 0.004 :terminal-b 0.001}
+         {:roughness-m 1.5e-6 :density-kg-m3 998.0 :viscosity-pa-s 0.001}
+         {:available-diameters-m [0.04 0.063 0.075 0.1]
+          :max-velocity-m-s 2.0 :equipment-efficiency 0.7})
+        sized (:mep.design/system design)
+        segments (into {} (map (juxt :id identity) (:mep/segments sized)))
+        fitting (first (:mep/fittings sized))]
+    (is (empty? (integration/validate-mep-system sized)))
+    (is (= 0.005 (:mep/design-flow sized)))
+    (is (= 0.063 (:mep/size (segments :main))))
+    (is (= 0.04 (:mep/size (segments :branch-b))))
+    (is (= 0.02 (get-in segments [:branch-b :geometry :radius])))
+    (is (= #{0.04 0.063} (set (map :connector/size (:mep/connectors fitting)))))
+    (is (= 1.8 (:mep/loss-coefficient fitting)))
+    (is (pos? (get-in design [:mep.design/analysis :mep.network/segments 1
+                              :mep/minor-pressure-loss-pa])))))
+
 (deftest sizes-and-calculates-rectangular-duct-pressure-loss
   (let [sizing (integration/size-rectangular-duct
                 1.2 6.0 [[0.3 0.2] [0.4 0.25] [0.5 0.4] [0.6 0.4]])

@@ -3640,6 +3640,84 @@
 
 (declare validate-mep-system)
 
+(defn- default-fitting-loss-coefficient [fitting]
+  (or (:mep/loss-coefficient fitting)
+      (case (:mep/fitting-kind fitting)
+        :elbow (* 0.9 (/ (or (:mep/angle-deg fitting) 90.0) 90.0))
+        :reducer 0.3
+        :tee 1.8
+        :cross 2.0
+        :manifold 2.5
+        0.0)))
+
+(defn size-and-balance-authored-mep-system
+  "Size a connector-authored round pipe/duct tree and write the selected sizes
+  back to segment geometry and both sides of every fitting connection. Fitting
+  K-values participate in the hydraulic result, so the authored connector
+  graph, analysis graph, and regenerated geometry remain one model."
+  [system source-node terminal-demands fluid options]
+  (when-let [issues (seq (validate-mep-system system))]
+    (throw (ex-info "invalid MEP system" {:issues issues})))
+  (let [fitting-by-node (into {} (keep (fn [fitting]
+                                         (when-let [node (:mep/node-id fitting)]
+                                           [node fitting]))
+                                       (:mep/fittings system)))
+        network-segments
+        (mapv (fn [segment]
+                (let [[start end] (get-in segment [:geometry :directrix])
+                      from (:mep/from-node segment)
+                      to (:mep/to-node segment)]
+                  (when-not (and from to (= 3 (count start)) (= 3 (count end)))
+                    (throw (ex-info "authored network segment requires node ids and a 3D directrix"
+                                    {:segment (:id segment)})))
+                  {:id (:id segment) :from from :to to
+                   :length-m (vector-length (vector-sub end start))
+                   :elevation-change-m (- (nth end 2) (nth start 2))
+                   :minor-loss-coefficient
+                   (default-fitting-loss-coefficient (get fitting-by-node from))}))
+              (:mep/segments system))
+        analysis (size-and-balance-mep-network
+                  {:source-node source-node :segments network-segments
+                   :terminal-demands terminal-demands}
+                  fluid options)
+        sizing-by-id (into {} (map (juxt :id identity)
+                                   (:mep.network/segments analysis)))
+        resized-segments
+        (mapv (fn [segment]
+                (let [diameter (:mep/diameter-m (sizing-by-id (:id segment)))]
+                  (-> segment
+                      (assoc :mep/size diameter
+                             :mep/design-flow-m3-s
+                             (:segment/flow-m3-s (sizing-by-id (:id segment))))
+                      (assoc-in [:geometry :radius] (/ diameter 2.0))
+                      (update :mep/connectors
+                              #(mapv (fn [connector]
+                                       (assoc connector :connector/size diameter)) %)))))
+              (:mep/segments system))
+        connector-size
+        (into {} (map (fn [connector]
+                        [(:connector/id connector) (:connector/size connector)])
+                      (mapcat :mep/connectors resized-segments)))
+        resized-fittings
+        (mapv (fn [fitting]
+                (-> fitting
+                    (assoc :mep/loss-coefficient
+                           (default-fitting-loss-coefficient fitting))
+                    (update :mep/connectors
+                            #(mapv (fn [connector]
+                                     (if-let [size (connector-size
+                                                    (:connector/connected-to connector))]
+                                       (assoc connector :connector/size size)
+                                       connector)) %))))
+              (:mep/fittings system))
+        resized-system
+        (assoc system :mep/design-flow (:mep.network/source-flow-m3-s analysis)
+                      :mep/segments resized-segments :mep/fittings resized-fittings)]
+    (when-let [issues (seq (validate-mep-system resized-system))]
+      (throw (ex-info "sized MEP system produced an invalid connector graph"
+                      {:issues issues})))
+    {:mep.design/system resized-system :mep.design/analysis analysis}))
+
 (defn analyze-mep-system
   "Build the connector graph and calculate Darcy-Weisbach loss for each
   circular segment and the complete series path."
