@@ -1685,6 +1685,18 @@
                                     (:ifc/georeference source))})
       exchange)))
 
+(defn model-to-map-coordinate
+  "Convert a BIM model point into its declared projected CRS coordinate."
+  [project point]
+  (ifc/model-to-map-coordinate
+   (or (:ifc/georeference project) (:georeference project) {}) point))
+
+(defn map-to-model-coordinate
+  "Convert a projected CRS coordinate back into BIM model coordinates."
+  [project point]
+  (ifc/map-to-model-coordinate
+   (or (:ifc/georeference project) (:georeference project) {}) point))
+
 (defn import-ifc [document]
   (when-not (= "IFC4X3_ADD2" (:ifc/schema document))
     (throw (ex-info "unsupported IFC schema" {:schema (:ifc/schema document)})))
