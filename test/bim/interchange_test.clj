@@ -91,3 +91,15 @@
            (get-in (first pages) [:MediaBox 3])))
     (is (< 2383 (get-in (second pages) [:MediaBox 2]) 2385)
         "semantic sheet size is used when no print setting is assigned")))
+
+(deftest semantic-section-and-elevation-emit-vector-model-linework
+  (let [section {:view/id "section" :view/kind :section :view/axis :x
+                 :view/cut-position 0.0 :view/depth 10.0 :view/scale 20.0}
+        elevation (assoc section :view/id "elevation" :view/kind :elevation)
+        section-content (interchange/orthographic-pdf-content [storey] section {})
+        elevation-content (interchange/orthographic-pdf-content [storey] elevation {})]
+    (is (string/includes? section-content " m "))
+    (is (string/includes? section-content " S\n"))
+    (is (string/includes? elevation-content " m "))
+    (is (not (string/blank? section-content)))
+    (is (not (string/blank? elevation-content)))))
