@@ -87,6 +87,36 @@
                            route catalog {:max-velocity-m-s 0.1
                                           :max-pressure-loss-pa 10.0})))))
 
+(deftest closed-loop-fluid-network-balances-flow-and-pressure
+  (let [resistance 1.0e8
+        result
+        (mep/solve-closed-fluid-network
+         {:nodes [:source :left :right :terminal]
+          :edges [{:id :sl :from :source :to :left
+                   :resistance-pa-per-m3-s2 resistance}
+                  {:id :lt :from :left :to :terminal
+                   :resistance-pa-per-m3-s2 resistance}
+                  {:id :sr :from :source :to :right
+                   :resistance-pa-per-m3-s2 resistance}
+                  {:id :rt :from :right :to :terminal
+                   :resistance-pa-per-m3-s2 resistance}]
+          :source-pressures {:source 100000.0}
+          :demands {:terminal 0.01}}
+         {})
+        flows (:fluid.network/edge-flows-m3-s result)
+        pressures (:fluid.network/pressures-pa result)]
+    (doseq [edge [:sl :lt :sr :rt]]
+      (is (< (#?(:clj Math/abs :cljs js/Math.abs) (- 0.005 (flows edge))) 1.0e-9)))
+    (is (< (#?(:clj Math/abs :cljs js/Math.abs) (- 97500.0 (pressures :left))) 1.0e-3))
+    (is (< (#?(:clj Math/abs :cljs js/Math.abs) (- 95000.0 (pressures :terminal))) 1.0e-3))
+    (is (< (#?(:clj Math/abs :cljs js/Math.abs)
+            (- 0.01 (get-in result [:fluid.network/source-flows-m3-s :source])))
+           1.0e-9))
+    (is (< (:fluid.network/maximum-residual-m3-s result) 1.0e-9))
+    (is (every? #(< (#?(:clj Math/abs :cljs js/Math.abs) %) 1.0e-6)
+                (vals (:fluid.network/edge-energy-residuals-pa result))))
+    (is (< 0 (:fluid.network/iterations result) 100))))
+
 (deftest electrical-panel-balances-and-checks-circuits
   (let [circuits [(mep/electrical-circuit
                    {:id :c1 :name "Lighting" :apparent-power-va 2300.0 :voltage-v 230.0

@@ -44,9 +44,17 @@
                                   (throw (ex-info "MEP design system not found"
                                                   {:system-id system-id})))]
                    [system-id
-                    (integration/size-and-balance-authored-mep-system
-                     system (:source-node request) (:terminal-demands request)
-                     (:fluid request) (:options request))])))
+                    (case (or (:mode request) :tree)
+                      :tree
+                      (integration/size-and-balance-authored-mep-system
+                       system (:source-node request) (:terminal-demands request)
+                       (:fluid request) (:options request))
+                      :closed
+                      (integration/analyze-closed-authored-mep-system
+                       system (:source-pressures request) (:terminal-demands request)
+                       (:fluid request) (:options request))
+                      (throw (ex-info "unsupported MEP regeneration mode"
+                                      {:system-id system-id :mode (:mode request)})))])))
           requests)))
 
 (defn- coordinate-project [project structure designs results]

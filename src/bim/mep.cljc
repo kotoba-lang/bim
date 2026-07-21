@@ -334,6 +334,164 @@
                    {:max-velocity-m-s max-velocity-m-s
                     :max-pressure-loss-pa max-pressure-loss-pa}))))
 
+(defn- solve-linear-system [matrix values]
+  (let [size (count values)]
+    (loop [column 0 matrix (mapv vec matrix) values (vec values)]
+      (if (= column size)
+        (loop [row (dec size) result (vec (repeat size 0.0))]
+          (if (neg? row)
+            result
+            (let [known (reduce + (map (fn [index]
+                                         (* (get-in matrix [row index]) (nth result index)))
+                                       (range (inc row) size)))]
+              (recur (dec row)
+                     (assoc result row (/ (- (nth values row) known)
+                                          (get-in matrix [row row])))))))
+        (let [pivot-row (apply max-key #(math-abs (get-in matrix [% column]))
+                               (range column size))
+              matrix (assoc matrix column (nth matrix pivot-row)
+                            pivot-row (nth matrix column))
+              values (assoc values column (nth values pivot-row)
+                            pivot-row (nth values column))
+              pivot (get-in matrix [column column])]
+          (when (< (math-abs pivot) 1.0e-18)
+            (throw (ex-info "fluid network Jacobian is singular" {:node-index column})))
+          (let [[matrix values]
+                (reduce (fn [[current current-values] row]
+                          (let [factor (/ (get-in current [row column]) pivot)]
+                            [(assoc current row
+                                    (mapv - (nth current row)
+                                          (mapv #(* factor %) (nth current column))))
+                             (assoc current-values row
+                                    (- (nth current-values row)
+                                       (* factor (nth current-values column))))]))
+                        [matrix values] (range (inc column) size))]
+            (recur (inc column) matrix values)))))))
+
+(defn fluid-edge-resistance
+  "Return quadratic pressure resistance R for Δp = R·q·|q|."
+  [{:keys [length-m diameter-m density-kg-m3 friction-factor
+           minor-loss-coefficient]}]
+  (when-not (and (every? #(and (number? %) (pos? %))
+                              [length-m diameter-m density-kg-m3 friction-factor])
+                 (or (nil? minor-loss-coefficient)
+                     (and (number? minor-loss-coefficient)
+                          (not (neg? minor-loss-coefficient)))))
+    (throw (ex-info "fluid edge resistance requires positive geometry and fluid data"
+                    {:length-m length-m :diameter-m diameter-m})))
+  (let [area (* pi diameter-m diameter-m 0.25)
+        loss-factor (+ (* friction-factor (/ length-m diameter-m))
+                       (or minor-loss-coefficient 0.0))]
+    (* loss-factor (/ density-kg-m3 (* 2.0 area area)))))
+
+(defn solve-closed-fluid-network
+  "Solve branched or closed-loop fluid flow by the nonlinear nodal-pressure
+  method. Edge resistance follows Δp=R·q·|q|; positive node demand extracts
+  flow, and one or more source nodes have fixed pressure."
+  [{:keys [nodes edges source-pressures demands initial-pressures]
+    :as network}
+   {:keys [tolerance-m3-s max-iterations pressure-regularization-pa]
+    :or {tolerance-m3-s 1.0e-9 max-iterations 100
+         pressure-regularization-pa 1.0e-6}}]
+  (let [node-set (set nodes)
+        edge-ids (map :id edges)
+        source-set (set (keys source-pressures))
+        unknowns (vec (sort-by str (remove source-set nodes)))
+        unknown-index (into {} (map-indexed (fn [index id] [id index]) unknowns))
+        resistances
+        (into {} (map (fn [edge]
+                        [(:id edge) (or (:resistance-pa-per-m3-s2 edge)
+                                        (fluid-edge-resistance edge))]) edges))]
+    (when-not (and (seq node-set) (= (count nodes) (count node-set))
+                   (seq edges) (= (count edge-ids) (count (distinct edge-ids)))
+                   (seq source-set) (every? node-set source-set)
+                   (every? node-set (keys demands))
+                   (every? #(and (node-set (:from %)) (node-set (:to %))
+                                 (not= (:from %) (:to %))) edges)
+                   (every? #(and (number? %) (pos? %)) (vals resistances))
+                   (every? #(and (number? %) (not (neg? %))) (vals demands)))
+      (throw (ex-info "invalid closed fluid network" {:network network})))
+    (let [minimum-source-pressure (reduce min (vals source-pressures))
+          initial (mapv #(or (get initial-pressures %)
+                             (- minimum-source-pressure 1000.0)) unknowns)
+          evaluate
+          (fn [unknown-pressures]
+            (let [pressures (merge source-pressures
+                                   (zipmap unknowns unknown-pressures))
+                  size (count unknowns)
+                  base-residual (mapv #(- (or (demands %) 0.0)) unknowns)
+                  base-jacobian (vec (repeat size (vec (repeat size 0.0))))]
+              (reduce
+               (fn [{:keys [flows residual jacobian]} edge]
+                 (let [from (:from edge) to (:to edge)
+                       delta (- (pressures from) (pressures to))
+                       resistance (resistances (:id edge))
+                       absolute (math-abs delta)
+                       regularized (max absolute pressure-regularization-pa)
+                       flow (if (< absolute pressure-regularization-pa)
+                              (/ delta (sqrt (* resistance pressure-regularization-pa)))
+                              (* (if (neg? delta) -1.0 1.0)
+                                 (sqrt (/ absolute resistance))))
+                       derivative (if (< absolute pressure-regularization-pa)
+                                    (/ 1.0 (sqrt (* resistance pressure-regularization-pa)))
+                                    (/ 0.5 (sqrt (* resistance regularized))))
+                       from-index (unknown-index from) to-index (unknown-index to)
+                       residual (cond-> residual
+                                  from-index (update from-index - flow)
+                                  to-index (update to-index + flow))
+                       jacobian
+                       (cond-> jacobian
+                         from-index (update-in [from-index from-index] - derivative)
+                         (and from-index to-index)
+                         (update-in [from-index to-index] + derivative)
+                         (and to-index from-index)
+                         (update-in [to-index from-index] + derivative)
+                         to-index (update-in [to-index to-index] - derivative))]
+                   {:flows (assoc flows (:id edge) flow)
+                    :residual residual :jacobian jacobian :pressures pressures}))
+               {:flows {} :residual base-residual :jacobian base-jacobian
+                :pressures pressures} edges)))
+          solved
+          (loop [iteration 0 pressures initial]
+            (let [{:keys [residual] :as state} (evaluate pressures)
+                  maximum-residual (reduce max 0.0 (map math-abs residual))]
+              (cond
+                (<= maximum-residual tolerance-m3-s)
+                (assoc state :iterations iteration :maximum-residual maximum-residual)
+                (>= iteration max-iterations)
+                (throw (ex-info "closed fluid network did not converge"
+                                {:iterations iteration :maximum-residual maximum-residual}))
+                :else
+                (let [correction (solve-linear-system
+                                  (:jacobian state) (mapv - residual))]
+                  (recur (inc iteration) (mapv + pressures correction))))))
+          pressures (:pressures solved)
+          flows (:flows solved)
+          node-balance
+          (reduce (fn [result edge]
+                    (let [flow (flows (:id edge))]
+                      (-> result (update (:from edge) (fnil - 0.0) flow)
+                          (update (:to edge) (fnil + 0.0) flow))))
+                  (zipmap nodes (repeat 0.0)) edges)
+          source-flows (into {} (map (fn [id] [id (- (node-balance id))]) source-set))
+          energy-residuals
+          (into {}
+                (map (fn [edge]
+                       (let [flow (flows (:id edge))]
+                         [(:id edge)
+                          (- (- (pressures (:from edge)) (pressures (:to edge)))
+                             (* (resistances (:id edge)) flow (math-abs flow)))]))
+                     edges))]
+      {:fluid.network/pressures-pa pressures
+       :fluid.network/edge-flows-m3-s flows
+       :fluid.network/source-flows-m3-s source-flows
+       :fluid.network/edge-energy-residuals-pa energy-residuals
+       :fluid.network/node-continuity-m3-s
+       (into {} (map (fn [id]
+                       [id (- (node-balance id) (or (demands id) 0.0))]) nodes))
+       :fluid.network/iterations (:iterations solved)
+       :fluid.network/maximum-residual-m3-s (:maximum-residual solved)})))
+
 (defn electrical-circuit
   [{:keys [id name apparent-power-va voltage-v power-factor poles phase
            length-m conductor-area-mm2]}]
