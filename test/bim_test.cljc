@@ -421,6 +421,59 @@
     (is (= ["handle-1"] (mapv :id (:components fine))))
     (is (= false (get-in fine [:family/parameters :show-trim])))))
 
+(deftest family-lookup-table-formulas-match-revit-size-lookup
+  (let [family
+        (integration/family-definition
+         {:id "pipe-fitting" :name "Pipe Fitting" :category :pipe-fitting
+          :parameters {:nominal-diameter {:type :length :scope :type :default 0.1}
+                       :outside-diameter {:type :length :scope :type :default 0.0}
+                       :wall-thickness {:type :length :scope :type :default 0.0}}
+          :lookup-tables
+          {:dimensions [{:nominal 0.05 :outside 0.0603 :wall 0.0039}
+                        {:nominal 0.1 :outside 0.1143 :wall 0.0060}]}
+          :formulas
+          {:outside-diameter [:lookup :dimensions :outside 0.0 :nominal
+                              [:param :nominal-diameter]]
+           :wall-thickness [:lookup :dimensions :wall 0.004 :nominal
+                            [:param :nominal-diameter]]}
+          :template {:kind :pipe-fitting
+                     :outside-diameter [:param :outside-diameter]
+                     :wall-thickness [:param :wall-thickness]}})
+        exact (integration/instantiate-family family 90 {:nominal-diameter 0.1})
+        fallback (integration/instantiate-family family 91 {:nominal-diameter 0.08})]
+    (is (= 0.1143 (:outside-diameter exact)))
+    (is (= 0.006 (:wall-thickness exact)))
+    (is (= 0.0 (:outside-diameter fallback)))
+    (is (= 0.004 (:wall-thickness fallback)))
+    (is (thrown-with-msg?
+         #?(:clj Exception :cljs js/Error) #"lookup table not found"
+         (integration/instantiate-family
+          (assoc-in family [:family/formulas :outside-diameter 1] :missing)
+          92 {})))))
+
+(deftest reporting-dimensions-drive-downstream-family-formulas
+  (let [family
+        (integration/family-definition
+         {:id "reporting-panel" :name "Reporting Panel" :category :panel
+          :parameters
+          {:left-offset {:type :length :default 1.0}
+           :right-offset {:type :length :default 4.5}
+           :measured-width {:type :length
+                            :reporting {:kind :distance :from :left :to :right}}
+           :measured-area {:type :area :default 0.0}}
+          :reference-planes
+          {:left {:axis :x :offset [:param :left-offset]}
+           :right {:axis :x :offset [:param :right-offset]}}
+          :formulas {:measured-area [:* [:param :measured-width] 2.0]}
+          :template {:kind :panel :width [:param :measured-width]
+                     :area [:param :measured-area]}})
+        instance (integration/instantiate-family family 93 {})]
+    (is (= 3.5 (get-in instance [:family/parameters :measured-width])))
+    (is (= 7.0 (:area instance)))
+    (is (thrown-with-msg?
+         #?(:clj Exception :cljs js/Error) #"reporting parameter cannot be overridden"
+         (integration/instantiate-family family 94 {:measured-width 10.0})))))
+
 (deftest shared-parameters-and-revit-type-catalog-round-trip
   (let [family (integration/family-definition
                 {:id "catalog-door" :name "Catalog Door" :category :door
