@@ -1,6 +1,7 @@
 (ns bim.interchange
   "BIM drawing export through shared kotoba-lang DXF and ISO PDF libraries."
   (:require [clojure.string :as string]
+            [bim :as bim]
             [dxf.core :as dxf]
             [bim.drawing :as drawing]
             [pdf.core :as pdf]))
@@ -105,6 +106,52 @@
     [(or (:width options) (mm->points paper-width))
      (or (:height options) (mm->points paper-height))]))
 
+(defn orthographic-pdf-content
+  "Project model mesh bounds into vector PDF linework for section/elevation
+  semantic views. View keys support :view/axis, :view/cut-position,
+  :view/depth and :view/scale."
+  [storeys view {:keys [page-height margin] :or {page-height 595.0 margin 180.0}}]
+  (let [kind (:view/kind view)
+        axis (or (:view/axis view) :x)
+        horizontal-index (if (= axis :x) 0 1)
+        depth-index (if (= horizontal-index 0) 1 0)
+        cut (or (:view/cut-position view) 0.0)
+        depth (or (:view/depth view) 1000.0)
+        scale (or (:view/scale view) 15.0)
+        entries
+        (keep (fn [element]
+                (when-let [mesh (bim/element-mesh element)]
+                  (let [positions (:positions mesh)
+                        horizontal (map #(nth % horizontal-index) positions)
+                        vertical (map #(nth % 2) positions)
+                        depths (map #(nth % depth-index) positions)
+                        bounds {:horizontal [(reduce min horizontal) (reduce max horizontal)]
+                                :vertical [(reduce min vertical) (reduce max vertical)]
+                                :depth [(reduce min depths) (reduce max depths)]}
+                        [near far] (:depth bounds)
+                        visible? (if (= kind :section)
+                                   (and (<= near (+ cut depth)) (>= far cut))
+                                   (<= (#?(:clj Math/abs :cljs js/Math.abs) (- near cut))
+                                       depth))]
+                    (when visible? {:element element :bounds bounds}))))
+              (mapcat :elements storeys))
+        points (mapcat (fn [{:keys [bounds]}]
+                         (let [[x0 x1] (:horizontal bounds) [z0 z1] (:vertical bounds)]
+                           [[x0 z0] [x1 z1]])) entries)
+        min-x (if (seq points) (reduce min (map first points)) 0.0)
+        min-z (if (seq points) (reduce min (map second points)) 0.0)
+        point (fn [[x z]] [(+ margin (* scale (- x min-x)))
+                           (- page-height margin (* scale (- z min-z)))])
+        rectangle
+        (fn [{:keys [bounds]}]
+          (let [[x0 x1] (:horizontal bounds) [z0 z1] (:vertical bounds)
+                corners [[x0 z0] [x1 z0] [x1 z1] [x0 z1] [x0 z0]]]
+            (apply str (map (fn [[from to]]
+                              (pdf/line-command {:from (point from) :to (point to)
+                                                 :width (if (= kind :section) 1.5 0.8)}))
+                            (partition 2 1 corners)))))]
+    (apply str (map rectangle entries))))
+
 (defn- semantic-sheet-content
   [sheet drawing-set {:keys [storeys annotations-by-storey] :as options} width height]
   (let [views (into {} (map (juxt :view/id identity) (:drawing/views drawing-set)))
@@ -138,6 +185,12 @@
            storey (assoc options :page-height height :scale (or (:scale options) 20.0)
                          :margin 180.0
                          :annotations (get annotations-by-storey (:id storey)))))
+        orthographic-content
+        (for [view-id view-ids
+              :let [view (views view-id)]
+              :when (#{:section :elevation} (:view/kind view))]
+          (orthographic-pdf-content storeys view
+                                    {:page-height height :margin 180.0}))
         schedule-content
         (for [schedule-id view-ids
               :let [schedule (schedules schedule-id)]
@@ -152,7 +205,7 @@
                                               (map #(get row (:key %))
                                                    (:schedule/fields schedule))))}))
                   (:schedule/rows schedule))))]
-    (apply str (concat heading plan-content schedule-content))))
+    (apply str (concat heading plan-content orthographic-content schedule-content))))
 
 (defn semantic-drawing-set-pdf
   "Publish one PDF page per semantic sheet. Sheet order, paper settings, view
