@@ -501,14 +501,30 @@
    :circuit/conductor-area-mm2 conductor-area-mm2})
 
 (defn balance-panel
-  "Assign unphased single-pole circuits greedily to the least-loaded phase."
+  "Assign unphased single-pole circuits greedily to the least-loaded phase;
+  three-pole loads are distributed equally across all panel phases."
   [phases circuits]
+  (when-not (and (seq phases) (= (count phases) (count (distinct phases)))
+                 (every? #(or (nil? (:circuit/phase %))
+                              (contains? (set phases) (:circuit/phase %))) circuits)
+                 (every? #(or (not= 3 (:circuit/poles %)) (= 3 (count phases))) circuits))
+    (throw (ex-info "panel phases and circuit poles are incompatible"
+                    {:phases phases})))
   (let [initial-loads (zipmap phases (repeat 0.0))]
     (reduce
      (fn [{:keys [loads assignments]} circuit]
-       (if-let [phase (:circuit/phase circuit)]
-         {:loads (update loads phase + (:circuit/apparent-power-va circuit))
-          :assignments (assoc assignments (:circuit/id circuit) phase)}
+       (cond
+         (= 3 (:circuit/poles circuit))
+         {:loads (reduce #(update %1 %2 + (/ (:circuit/apparent-power-va circuit)
+                                             (count phases))) loads phases)
+          :assignments (assoc assignments (:circuit/id circuit) :three-phase)}
+
+         (:circuit/phase circuit)
+         (let [phase (:circuit/phase circuit)]
+           {:loads (update loads phase + (:circuit/apparent-power-va circuit))
+            :assignments (assoc assignments (:circuit/id circuit) phase)})
+
+         :else
          (let [phase (first (sort-by (juxt loads name) phases))]
            {:loads (update loads phase + (:circuit/apparent-power-va circuit))
             :assignments (assoc assignments (:circuit/id circuit) phase)})))
@@ -573,11 +589,15 @@
 
 (defn analyze-panel
   [{:keys [id phases circuits main-rating-a demand-factor max-imbalance-percent
-           max-voltage-drop-percent]}]
+           max-voltage-drop-percent line-voltage-v]}]
   (let [balance (balance-panel phases circuits)
         demanded-loads (into {} (map (fn [[phase load]] [phase (* load (or demand-factor 1.0))])
                                      (:loads balance)))
-        phase-currents (into {} (map (fn [[phase load]] [phase (/ load 230.0)]) demanded-loads))
+        phase-voltage (if (= 3 (count phases))
+                        (/ (or line-voltage-v (* 230.0 (sqrt 3.0))) (sqrt 3.0))
+                        (or line-voltage-v 230.0))
+        phase-currents (into {} (map (fn [[phase load]] [phase (/ load phase-voltage)])
+                                     demanded-loads))
         maximum (reduce max 0.0 (vals phase-currents)) minimum (reduce min (vals phase-currents))
         average (/ (reduce + (vals phase-currents)) (count phases))
         imbalance (if (zero? average) 0.0 (* 100.0 (/ (- maximum minimum) average)))
@@ -601,6 +621,9 @@
                        {:issue/type :electrical/voltage-drop :circuit-id circuit-id
                         :percent (:electrical/voltage-drop-percent drop)})))]
     {:panel/id id :panel/assignments (:assignments balance)
+     :panel/line-voltage-v (or line-voltage-v
+                               (if (= 3 (count phases)) (* 230.0 (sqrt 3.0)) 230.0))
+     :panel/phase-voltage-v phase-voltage
      :panel/phase-loads-va demanded-loads :panel/phase-currents-a phase-currents
      :panel/imbalance-percent imbalance :panel/voltage-drops drops :panel/issues issues}))
 
@@ -708,3 +731,149 @@
      :electrical.coordination/downstream-threshold-a downstream-threshold
      :electrical.coordination/upstream-threshold-a upstream-threshold
      :electrical.coordination/coordinated? (boolean coordinated?)}))
+
+(defn analyze-electrical-distribution
+  "Analyze a radial source-panel → feeder → downstream-panel hierarchy.
+  Downstream diversified loads roll up into upstream panels and feeders;
+  results include phase balance, voltage drop, fault duty, selected protection,
+  and pairwise upstream/downstream protection coordination."
+  [{:keys [root-panel panels feeders protective-device-catalog]}]
+  (let [panel-by-id (into {} (map (juxt :id identity) panels))
+        feeder-ids (map :id feeders)
+        children (group-by :from feeders)
+        parent-feeder (into {} (map (juxt :to identity) feeders))
+        panel-ids (set (keys panel-by-id))]
+    (when-not (and (panel-by-id root-panel)
+                   (= (count panels) (count panel-by-id))
+                   (= (count feeders) (count (distinct feeder-ids)))
+                   (every? #(and (panel-by-id (:from %)) (panel-by-id (:to %))
+                                 (not= (:from %) (:to %))) feeders)
+                   (every? #(= 1 %) (vals (frequencies (map :to feeders))))
+                   (nil? (parent-feeder root-panel)))
+      (throw (ex-info "invalid radial electrical distribution topology"
+                      {:root-panel root-panel})))
+    (let [reachable
+          (loop [pending [root-panel] visited #{}]
+            (if-let [panel-id (peek pending)]
+              (if (visited panel-id)
+                (recur (pop pending) visited)
+                (recur (into (pop pending) (map :to (children panel-id)))
+                       (conj visited panel-id)))
+              visited))]
+      (when-not (= reachable panel-ids)
+        (throw (ex-info "electrical distribution has cycles or unreachable panels"
+                        {:unreachable (set (remove reachable panel-ids))})))
+      (let [local-load
+            (fn [panel]
+              (* (or (:demand-factor panel) 1.0)
+                 (reduce + 0.0 (map :circuit/apparent-power-va (:circuits panel)))))
+            downstream-load
+            (fn downstream-load [panel-id]
+              (+ (local-load (panel-by-id panel-id))
+                 (reduce + 0.0 (map #(downstream-load (:to %))
+                                    (children panel-id)))))
+            loads (into {} (map (fn [id] [id (downstream-load id)]) panel-ids))
+            feeder-order
+            (loop [pending [root-panel] result []]
+              (if-let [panel-id (first pending)]
+                (let [outgoing (vec (sort-by (comp str :id) (children panel-id)))]
+                  (recur (into (subvec (vec pending) 1) (map :to outgoing))
+                         (into result outgoing)))
+                result))
+            feeder-results
+            (reduce (fn [result feeder]
+                      (let [target (panel-by-id (:to feeder))
+                            upstream (parent-feeder (:from feeder))
+                            upstream-analysis
+                            (get-in result [(:id upstream)
+                                            :electrical.distribution/analysis])
+                            source-r (or (:source-resistance-ohm feeder)
+                                         (:electrical.feeder/fault-resistance-ohm
+                                          upstream-analysis)
+                                         0.0)
+                            source-x (or (:source-reactance-ohm feeder)
+                                         (:electrical.feeder/fault-reactance-ohm
+                                          upstream-analysis)
+                                         0.0)
+                               analysis
+                               (analyze-electrical-feeder
+                                (merge feeder
+                                       {:apparent-power-va (loads (:to feeder))
+                                        :voltage-v (or (:voltage-v feeder)
+                                                       (:line-voltage-v target))
+                                        :source-resistance-ohm source-r
+                                        :source-reactance-ohm source-x}))
+                               protection (select-protective-device
+                                           analysis protective-device-catalog)]
+                        (assoc result (:id feeder)
+                               {:electrical.distribution/feeder feeder
+                                :electrical.distribution/downstream-load-va
+                                (loads (:to feeder))
+                                :electrical.distribution/analysis analysis
+                                :electrical.distribution/protection protection})))
+                    {} feeder-order)
+            panel-results
+            (into {}
+                  (map (fn [panel]
+                         (let [child-circuits
+                               (mapv (fn [feeder]
+                                       (electrical-circuit
+                                        {:id [:feeder (:id feeder)]
+                                         :name (str "Feeder " (:id feeder))
+                                         :apparent-power-va (loads (:to feeder))
+                                         :voltage-v (:line-voltage-v panel)
+                                         :power-factor (or (:power-factor feeder) 1.0)
+                                         :poles (if (= 3 (count (:phases panel))) 3 1)
+                                         :length-m 0.0 :conductor-area-mm2 1.0}))
+                                     (children (:id panel)))
+                               result (analyze-panel
+                                       {:id (:id panel) :phases (:phases panel)
+                                        :circuits (vec (concat (:circuits panel) child-circuits))
+                                        :main-rating-a (:main-rating-a panel)
+                                        :demand-factor 1.0
+                                        :line-voltage-v (:line-voltage-v panel)
+                                        :max-imbalance-percent (:max-imbalance-percent panel)
+                                        :max-voltage-drop-percent
+                                        (:max-voltage-drop-percent panel)})]
+                           [(:id panel)
+                            (assoc result :panel/local-load-va (local-load panel)
+                                          :panel/downstream-load-va (loads (:id panel)))]))
+                       panels))
+            coordinations
+            (into {}
+                  (keep (fn [feeder]
+                          (when-let [upstream-feeder (parent-feeder (:from feeder))]
+                            (let [downstream-device
+                                  (get-in feeder-results
+                                          [(:id feeder) :electrical.distribution/protection
+                                           :electrical.protection/device])
+                                  upstream-device
+                                  (get-in feeder-results
+                                          [(:id upstream-feeder)
+                                           :electrical.distribution/protection
+                                           :electrical.protection/device])
+                                  fault-current
+                                  (get-in feeder-results
+                                          [(:id feeder) :electrical.distribution/analysis
+                                           :electrical.feeder/prospective-fault-current-a])]
+                              [(:id feeder)
+                               (check-protection-coordination
+                                downstream-device upstream-device fault-current)])))
+                        feeders))
+            issues
+            (vec
+             (concat
+              (mapcat :panel/issues (vals panel-results))
+              (mapcat #(get-in % [:electrical.distribution/analysis
+                                  :electrical.feeder/issues])
+                      (vals feeder-results))
+              (for [[feeder-id result] coordinations
+                    :when (not (:electrical.coordination/coordinated? result))]
+                {:issue/type :electrical/protection-not-coordinated
+                 :issue/feeder feeder-id})))]
+        {:electrical.distribution/root-panel root-panel
+         :electrical.distribution/total-load-va (loads root-panel)
+         :electrical.distribution/panels panel-results
+         :electrical.distribution/feeders feeder-results
+         :electrical.distribution/coordinations coordinations
+         :electrical.distribution/issues issues}))))

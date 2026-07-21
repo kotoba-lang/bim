@@ -1,6 +1,7 @@
 (ns bim.regeneration
   "Coordinated incremental regeneration of BIM-derived design artifacts."
   (:require [bim.integration :as integration]
+            [bim.mep :as mep]
             [ifc.core :as ifc]
             [kotoba.document.artifact-graph :as artifact-graph]))
 
@@ -57,7 +58,7 @@
                                       {:system-id system-id :mode (:mode request)})))])))
           requests)))
 
-(defn- coordinate-project [project structure designs results]
+(defn- coordinate-project [project structure designs results electrical]
   (let [designed-systems (into {} (map (fn [[id design]]
                                          [id (:mep.design/system design)])) designs)
         systems (mapv #(get designed-systems (:mep/id %) %) (:mep/systems project))]
@@ -65,7 +66,8 @@
       (seq results) (assoc :structural/results results)
       (seq designs) (assoc :mep/design-results
                            (into {} (map (fn [[id design]]
-                                          [id (:mep.design/analysis design)])) designs)))))
+                                          [id (:mep.design/analysis design)]) designs)))
+      electrical (assoc :electrical/distribution-result electrical))))
 
 (def design-graph
   {:structural/model
@@ -82,13 +84,20 @@
    {:depends-on [:project :mep/requests] :version 1
     :build (fn [{:keys [dependencies]}]
              (mep-designs (:project dependencies) (:mep/requests dependencies)))}
+   :electrical/distribution
+   {:depends-on [:electrical/request] :version 1
+    :build (fn [{:keys [dependencies]}]
+             (when-let [request (:electrical/request dependencies)]
+               (mep/analyze-electrical-distribution request)))}
    :coordinated/project
-   {:depends-on [:project :structural/model :structural/results :mep/designs] :version 1
+   {:depends-on [:project :structural/model :structural/results :mep/designs
+                 :electrical/distribution] :version 1
     :build (fn [{:keys [dependencies]}]
              (coordinate-project (:project dependencies)
                                  (:structural/model dependencies)
                                  (:mep/designs dependencies)
-                                 (:structural/results dependencies)))}
+                                 (:structural/results dependencies)
+                                 (:electrical/distribution dependencies)))}
    :drawing/set
    {:depends-on [:coordinated/project :drawing/seed] :version 1
     :build (fn [{:keys [dependencies]}]
@@ -111,7 +120,8 @@
   passed back as `previous`; unchanged artifacts are reused exactly."
   ([inputs] (regenerate inputs (artifact-graph/state) {}))
   ([inputs previous] (regenerate inputs previous {}))
-  ([{:keys [project structural-config structural-request mep-requests drawing-set]}
+  ([{:keys [project structural-config structural-request mep-requests
+            electrical-request drawing-set]}
     previous options]
    (when-not project
      (throw (ex-info "BIM regeneration requires an authored project" {})))
@@ -120,6 +130,7 @@
                   :structural/config (or structural-config {})
                   :structural/request structural-request
                   :mep/requests (or mep-requests {})
+                  :electrical/request electrical-request
                   :drawing/seed (or drawing-set managed-drawing)}
          default-tokens (assoc sources :drawing/seed drawing-set)
          tokens (or (:source-tokens options) default-tokens)
