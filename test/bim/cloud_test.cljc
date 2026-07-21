@@ -79,3 +79,39 @@
            (:sync/status (cloud/pull-deltas compacted "tower" 0))))
     (is (= [2] (mapv :sync/revision
                      (:sync/deltas (cloud/pull-deltas compacted "tower" 1)))))))
+
+(deftest opencde-publishes-model-and-bcf-for-cloud-itonami
+  (let [initial (cloud/register-opencde-project
+                 (cloud/opencde-store) "admin"
+                 {:id "tower" :name "Tower"
+                  :memberships {"admin" :admin "bim-author" :editor
+                                "coordinator" :reviewer "itonami" :viewer}
+                  :timestamp 1})
+        model-result
+        (cloud/publish-model-version
+         initial "tower" "bim-author"
+         {:document-id "federated-ifc" :name "Tower.ifc"
+          :content-ref "s3://models/tower-v1.ifc" :content-hash "sha256:model-v1"
+          :base-version 0 :idempotency-key "tower-model-v1" :timestamp 2})
+        topic {:bcf/version "3.0" :bcf/contract-version 1
+               :bcf.topic/guid "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+               :bcf.topic/type "Clash" :bcf.topic/status "Open"
+               :bcf.topic/title "Pipe clashes with beam"
+               :bcf.topic/description "Coordinate route"
+               :bcf.topic/creation-date "2026-07-21T00:00:00Z"
+               :bcf.topic/creation-author "coord@example.com"
+               :bcf.topic/labels [] :bcf.topic/reference-links []
+               :bcf.topic/viewpoints [] :bcf.topic/comments []}
+        topics-result
+        (cloud/publish-bcf-topics
+         (:opencde/state model-result) "tower" "coordinator" [topic]
+         {:expected-revisions {} :idempotency-prefix "coord-1" :timestamp 3})
+        snapshot (cloud/cloud-itonami-cde-snapshot
+                  (:opencde/state topics-result) "tower" "itonami")]
+    (is (= :created (:opencde/status model-result)))
+    (is (= :published (:opencde/status topics-result)))
+    (is (= :design/opencde-snapshot (:itonami/event snapshot)))
+    (is (= "sha256:model-v1"
+           (get-in snapshot [:opencde/documents 0 :document/content-hash])))
+    (is (= "Pipe clashes with beam"
+           (get-in snapshot [:opencde/topics 0 :topic/value :bcf.topic/title])))))

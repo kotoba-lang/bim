@@ -1,8 +1,65 @@
 (ns bim.cloud
   "Transport-neutral cloud-itonami BIM synchronization contracts: resumable
-  chunk uploads, integrity checks, and idempotent conversion jobs.")
+  chunk uploads, integrity checks, idempotent conversion jobs, and OpenCDE
+  project/document/BCF exchange."
+  (:require [kotoba.issue.opencde :as opencde]))
 
 (def schema-version 1)
+
+(def opencde-service-info opencde/service-info)
+(def opencde-store opencde/store)
+(def register-opencde-project opencde/register-project)
+(def update-opencde-memberships opencde/update-memberships)
+(def get-opencde-document opencde/get-document)
+(def list-opencde-documents opencde/list-documents)
+(def get-opencde-topic opencde/get-topic)
+(def list-opencde-topics opencde/list-topics)
+(def opencde-audit-since opencde/audit-since)
+
+(defn publish-model-version
+  "Publish one BIM/IFC document version through the shared OpenCDE contract.
+  The host uploads bytes separately and supplies its durable content reference
+  and cryptographic hash."
+  [state project-id actor
+   {:keys [document-id name media-type content-ref content-hash base-version
+           idempotency-key metadata timestamp]}]
+  (opencde/put-document
+   state project-id actor
+   {:document-id document-id :name name
+    :media-type (or media-type "application/ifc")
+    :content-ref content-ref :content-hash content-hash
+    :base-version base-version :idempotency-key idempotency-key
+    :metadata (merge {:bim/schema-version schema-version} metadata)
+    :timestamp timestamp}))
+
+(defn publish-bcf-topics
+  "Atomically ordered BCF publication for cloud-itonami/OpenCDE. Stops at the
+  first optimistic conflict and returns the already-applied topic results."
+  [state project-id actor topics
+   {:keys [expected-revisions idempotency-prefix timestamp]}]
+  (loop [state state remaining (seq topics) results []]
+    (if-let [topic (first remaining)]
+      (let [guid (:bcf.topic/guid topic)
+            expected (get expected-revisions guid 0)
+            result (opencde/put-topic
+                    state project-id actor
+                    {:topic topic :expected-revision expected
+                     :idempotency-key (str idempotency-prefix ":" guid ":" expected)
+                     :timestamp timestamp})]
+        (if (= :conflict (:opencde/status result))
+          {:opencde/status :conflict :opencde/state state
+           :opencde/results results :opencde/conflict (:opencde/conflict result)}
+          (recur (:opencde/state result) (next remaining) (conj results result))))
+      {:opencde/status :published :opencde/state state :opencde/results results})))
+
+(defn cloud-itonami-cde-snapshot
+  "Read the current OpenCDE document/topic heads as a cloud-itonami bootstrap
+  envelope for an online or reconnecting editor."
+  [state project-id actor]
+  {:itonami/event :design/opencde-snapshot
+   :itonami/schema-version schema-version :project/id project-id
+   :opencde/documents (opencde/list-documents state project-id actor)
+   :opencde/topics (opencde/list-topics state project-id actor)})
 
 (defn checksum
   "Portable Adler-32-style checksum for transport corruption detection."
