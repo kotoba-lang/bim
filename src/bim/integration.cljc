@@ -5,6 +5,7 @@
             [clojure.string :as string]
             [clojure.walk :as walk]
             [bim :as bim]
+            [bim.structural :as structural]
             [ifc.core :as ifc]
             [kotoba.document.change :as document-change]
             [kotoba.document.collaboration :as collaboration]))
@@ -2273,14 +2274,19 @@
 
 (defn structural-analysis-member
   [{:keys [id start-node end-node area-m2 elastic-modulus-pa yield-strength-pa
-           resistance-factor section material density-kg-m3]}]
+           resistance-factor section material density-kg-m3 inertia-m4
+           release-start-moment? release-end-moment? connection]}]
   {:structural.member/id id :structural.member/start-node start-node
    :structural.member/end-node end-node :structural.member/area-m2 area-m2
    :structural.member/elastic-modulus-pa elastic-modulus-pa
    :structural.member/yield-strength-pa yield-strength-pa
    :structural.member/resistance-factor (or resistance-factor 0.9)
    :structural.member/section section :structural.member/material material
-   :structural.member/density-kg-m3 density-kg-m3})
+   :structural.member/density-kg-m3 density-kg-m3
+   :structural.member/inertia-m4 inertia-m4
+   :structural.member/release-start-moment? (boolean release-start-moment?)
+   :structural.member/release-end-moment? (boolean release-end-moment?)
+   :structural.member/connection connection})
 
 (defn structural-load-case [{:keys [id name kind nodal-loads member-loads gravity]}]
   {:structural.load-case/id id :structural.load-case/name name
@@ -2438,10 +2444,13 @@
       (when-not (= (count member-list) (count members))
         [{:issue/type :structural/duplicate-member-id}])
       (mapcat (fn [node]
-                (when-not (= (count (:structural.node/point node))
-                             (count (:structural.node/restraints node)))
+                (let [dimension (count (:structural.node/point node))
+                      dofs (count (:structural.node/restraints node))]
+                  (when-not (contains? (if (= dimension 2) #{2 3} #{3 6}) dofs)
                   [{:issue/type :structural/restraint-dimension-mismatch
-                    :issue/node (:structural.node/id node)}]))
+                    :issue/node (:structural.node/id node)
+                    :issue/spatial-dimension dimension
+                    :issue/restraint-dofs dofs}])))
               node-list)
       (mapcat (fn [member]
                (let [start (nodes (:structural.member/start-node member))
@@ -2560,6 +2569,9 @@
     (throw (ex-info "invalid structural model" {:issues issues})))
   (let [nodes (:structural/nodes model)
         dimension (count (:structural.node/point (first nodes)))
+        _ (when-not (every? #(= dimension (count (:structural.node/restraints %))) nodes)
+            (throw (ex-info "truss restraints must match the translational node dimension"
+                            {:dimension dimension})))
         node-index (into {} (map-indexed #(vector (:structural.node/id %2) %1) nodes))
         node-by-id (into {} (map (juxt :structural.node/id identity) nodes))
         dof-count (* dimension (count nodes))
@@ -2652,6 +2664,125 @@
   (when-not (= 3 (count (get-in model [:structural/nodes 0 :structural.node/point])))
     (throw (ex-info "3D truss requires 3D nodes" {})))
   (analyze-truss model load-case-id))
+
+(defn- frame-load-case [model load-case-id]
+  (or (first (filter #(= load-case-id (:structural.load-case/id %))
+                     (:structural/load-cases model)))
+      (throw (ex-info "structural load case not found" {:load-case-id load-case-id}))))
+
+(defn- aggregate-frame-loads [loads id-key value-keys]
+  (->> loads
+       (group-by id-key)
+       (mapv (fn [[id grouped]]
+               (reduce (fn [result key]
+                         (assoc result key (reduce + (map #(or (% key) 0.0) grouped))))
+                       {id-key id} value-keys)))))
+
+(defn analyze-2d-frame-model
+  "Run the bending-capable frame solver through the canonical BIM structural
+  model. Member end releases, uniform local line loads, nodal moments,
+  displacements, reactions, and end forces all use the same load case."
+  [model load-case-id]
+  (when-let [issues (seq (validate-structural-model model))]
+    (throw (ex-info "invalid structural model" {:issues issues})))
+  (let [load-case (frame-load-case model load-case-id)
+        nodes
+        (mapv (fn [node]
+                (let [point (:structural.node/point node)
+                      restraints (:structural.node/restraints node)]
+                  (when-not (and (= 2 (count point)) (= 3 (count restraints)))
+                    (throw (ex-info "2D frame requires [x y] nodes and [ux uy rz] restraints"
+                                    {:node (:structural.node/id node)})))
+                  {:id (:structural.node/id node) :point point :restraints restraints}))
+              (:structural/nodes model))
+        members
+        (mapv (fn [member]
+                (let [inertia (:structural.member/inertia-m4 member)]
+                  (when-not (pos? (or inertia 0.0))
+                    (throw (ex-info "2D frame member requires positive inertia-m4"
+                                    {:member (:structural.member/id member)})))
+                  {:id (:structural.member/id member)
+                   :start-node (:structural.member/start-node member)
+                   :end-node (:structural.member/end-node member)
+                   :area-m2 (:structural.member/area-m2 member)
+                   :elastic-modulus-pa (:structural.member/elastic-modulus-pa member)
+                   :inertia-m4 inertia
+                   :release-start-moment?
+                   (:structural.member/release-start-moment? member)
+                   :release-end-moment?
+                   (:structural.member/release-end-moment? member)}))
+              (:structural/members model))
+        nodal-loads
+        (aggregate-frame-loads (:structural.load-case/nodal-loads load-case)
+                               :node [:fx :fy :mz])
+        member-loads
+        (mapv (fn [load]
+                {:member (:member load)
+                 :qx (+ (or (:qx load) 0.0) (or (:wx load) 0.0))
+                 :qy (+ (or (:qy load) 0.0) (or (:wy load) 0.0))})
+              (aggregate-frame-loads (:structural.load-case/member-loads load-case)
+                                     :member [:qx :qy :wx :wy]))
+        frame (structural/analyze-2d-frame
+               {:nodes nodes :members members
+                :load-case {:nodal-loads nodal-loads :member-loads member-loads}})
+        node-results (:structural.frame/nodes frame)
+        member-results
+        (into {}
+              (map (fn [[id result]]
+                     (let [{:keys [n1 v1 m1 n2 v2 m2]} (:local-end-forces result)]
+                       [id (assoc result
+                                  :force-n (* 0.5 (- n2 n1))
+                                  :max-shear-n (max (math-abs v1) (math-abs v2))
+                                  :max-moment-nm (max (math-abs m1) (math-abs m2)))]))
+                   (:structural.frame/members frame)))]
+    {:structural.analysis/load-case load-case-id
+     :structural.analysis/kind :frame-2d
+     :structural.analysis/dimension 2
+     :structural.analysis/displacements
+     (into {} (map (fn [[id result]] [id [(:ux result) (:uy result) (:rz result)]])
+                   node-results))
+     :structural.analysis/reactions
+     (into {} (map (fn [[id result]] [id [(:rx result) (:ry result) (:rmz result)]])
+                   node-results))
+     :structural.analysis/member-results member-results
+     :structural.analysis/member-axial-forces
+     (into {} (map (fn [[id result]] [id (:force-n result)]) member-results))}))
+
+(defn analyze-2d-frame-combination
+  "Analyze a factored canonical load combination as a bending frame."
+  [model combination-id]
+  (let [combination (or (first (filter #(= combination-id (:structural.combination/id %))
+                                       (:structural/combinations model)))
+                        (throw (ex-info "structural load combination not found"
+                                        {:combination-id combination-id})))
+        cases (into {} (map (juxt :structural.load-case/id identity)
+                            (:structural/load-cases model)))
+        factored
+        (fn [load key factor keys]
+          (reduce (fn [result value-key]
+                    (assoc result value-key (* factor (or (load value-key) 0.0))))
+                  {key (load key)} keys))
+        nodal (mapcat (fn [[case-id factor]]
+                        (when-not (cases case-id)
+                          (throw (ex-info "structural load case not found"
+                                          {:load-case-id case-id
+                                           :combination-id combination-id})))
+                        (map #(factored % :node factor [:fx :fy :mz])
+                             (:structural.load-case/nodal-loads (cases case-id))))
+                      (:structural.combination/factors combination))
+        member (mapcat (fn [[case-id factor]]
+                         (map #(factored % :member factor [:qx :qy :wx :wy])
+                              (:structural.load-case/member-loads (cases case-id))))
+                       (:structural.combination/factors combination))
+        synthetic-id [:combination combination-id]
+        synthetic (structural-load-case
+                   {:id synthetic-id :name (:structural.combination/name combination)
+                    :kind (:structural.combination/kind combination)
+                    :nodal-loads nodal :member-loads member})
+        result (analyze-2d-frame-model
+                (update model :structural/load-cases conj synthetic) synthetic-id)]
+    (assoc result :structural.analysis/load-case nil
+                  :structural.analysis/combination combination-id)))
 
 (defn analyze-structural-combination
   "Analyze a factored load combination and check axial member resistance."

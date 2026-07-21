@@ -1115,6 +1115,35 @@
     (is (= 1650.0 (get-in combination [:structural.analysis/member-checks :bar :force-n])))
     (is (true? (get-in combination [:structural.analysis/member-checks :bar :passes?])))))
 
+(deftest canonical-structural-model-runs-frame-releases-and-distributed-loads
+  (let [model
+        (integration/structural-model
+         {:nodes [(integration/structural-node
+                   {:id :a :point [0.0 0.0] :restraints [true true false]})
+                  (integration/structural-node
+                   {:id :b :point [6.0 0.0] :restraints [false true false]})]
+          :members [(integration/structural-analysis-member
+                     {:id :beam :start-node :a :end-node :b
+                      :area-m2 0.01 :elastic-modulus-pa 2.0e11 :inertia-m4 8.0e-6
+                      :release-start-moment? true :release-end-moment? true})]
+          :load-cases [(integration/structural-load-case
+                        {:id :dead :name "Dead" :kind :dead
+                         :member-loads [{:member :beam :wy -10000.0}]})]
+          :combinations [(integration/structural-load-combination
+                          {:id :uls :name "ULS" :factors {:dead 1.5}})]})
+        result (integration/analyze-2d-frame-model model :dead)
+        combination (integration/analyze-2d-frame-combination model :uls)]
+    (is (empty? (integration/validate-structural-model model)))
+    (is (= :frame-2d (:structural.analysis/kind result)))
+    (is (= 30000.0 (get-in result [:structural.analysis/reactions :a 1])))
+    (is (= 30000.0 (get-in result [:structural.analysis/reactions :b 1])))
+    (is (zero? (get-in result [:structural.analysis/member-results :beam
+                               :local-end-forces :m1])))
+    (is (zero? (get-in result [:structural.analysis/member-results :beam
+                               :local-end-forces :m2])))
+    (is (= 45000.0 (get-in combination [:structural.analysis/reactions :a 1])))
+    (is (= :uls (:structural.analysis/combination combination)))))
+
 (deftest calculates-section-properties-and-beam-design-checks
   (let [rectangle (integration/structural-section-properties
                    {:kind :rectangle :width-m 0.2 :depth-m 0.4})
