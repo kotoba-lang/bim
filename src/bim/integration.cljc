@@ -41,15 +41,26 @@
                       {:guid guid :definitions definitions})))
     shared))
 
+(defn- validate-lookup-tables [tables]
+  (when-not (map? tables)
+    (throw (ex-info "family lookup tables must be a map" {:tables tables})))
+  (doseq [[table rows] tables]
+    (when-not (and (or (keyword? table) (string? table))
+                   (vector? rows) (every? map? rows))
+      (throw (ex-info "family lookup table must contain map rows"
+                      {:table table :rows rows}))))
+  tables)
+
 (defn family-definition
   [{:keys [id name category parameters formulas reference-planes sketches constraints
-           adaptive host types template shared-parameters shared?]}]
+           adaptive host types template shared-parameters shared? lookup-tables]}]
   (let [shared (validate-shared-parameters (or shared-parameters {}))]
     (when-let [parameter (first (filter (set (keys shared)) (keys parameters)))]
       (throw (ex-info "shared and local parameter names conflict"
                       {:parameter parameter})))
     {:family/id id :family/name name :family/category category
      :family/parameters (merge shared (or parameters {}))
+     :family/lookup-tables (validate-lookup-tables (or lookup-tables {}))
      :family/shared-parameters shared :family/formulas (or formulas {})
      :family/reference-planes (or reference-planes {})
      :family/sketches (or sketches {}) :family/adaptive adaptive :family/host host
@@ -183,20 +194,43 @@
                           parameters)))]
     (str (string/join "\n" (map #(string/join "," (map csv-cell %)) (cons header rows))) "\n")))
 
-(defn- eval-expr [params expression]
-  (cond
+(defn- lookup-table-value [tables table result-column default lookup-column lookup-value]
+  (let [rows (get tables table ::missing)]
+    (when (= ::missing rows)
+      (throw (ex-info "family lookup table not found" {:table table})))
+    (when-not (and result-column lookup-column)
+      (throw (ex-info "family lookup expression requires result and lookup columns"
+                      {:table table :result-column result-column
+                       :lookup-column lookup-column})))
+    (if-let [row (first (filter #(= lookup-value (get % lookup-column ::missing)) rows))]
+      (if (contains? row result-column)
+        (get row result-column)
+        (throw (ex-info "family lookup result column not found"
+                        {:table table :result-column result-column :row row})))
+      default)))
+
+(defn- eval-expr
+  ([params expression] (eval-expr params {} expression))
+  ([params tables expression]
+   (cond
     (and (vector? expression) (= :param (first expression)))
     (get params (second expression))
 
     (vector? expression)
     (let [[op & operands] expression]
       (case op
-        :if (eval-expr params (if (eval-expr params (first operands))
-                                (second operands) (nth operands 2)))
-        :and (every? true? (map #(boolean (eval-expr params %)) operands))
-        :or (boolean (some #(eval-expr params %) operands))
-        :not (not (eval-expr params (first operands)))
-        (let [values (mapv #(eval-expr params %) operands)]
+        :if (eval-expr params tables
+                       (if (eval-expr params tables (first operands))
+                         (second operands) (nth operands 2)))
+        :and (every? true? (map #(boolean (eval-expr params tables %)) operands))
+        :or (boolean (some #(eval-expr params tables %) operands))
+        :not (not (eval-expr params tables (first operands)))
+        :lookup
+        (let [[table result-column default lookup-column lookup-expression] operands]
+          (lookup-table-value tables table result-column
+                              (eval-expr params tables default) lookup-column
+                              (eval-expr params tables lookup-expression)))
+        (let [values (mapv #(eval-expr params tables %) operands)]
           (case op
             :+ (reduce + values) :- (reduce - values) :* (reduce * values)
             :/ (reduce / values) :min (reduce min values) :max (reduce max values)
@@ -213,7 +247,7 @@
             :> (apply > values) :>= (apply >= values)
             (throw (ex-info "unsupported family expression" {:expression expression}))))))
 
-    :else expression))
+    :else expression)))
 
 (defn- expression-parameters [expression]
   (cond
@@ -383,8 +417,10 @@
 (defn- validate-constraints! [family params planes]
   (doseq [constraint (:family/constraints family)]
     (case (:kind constraint)
-      :equal (let [left (eval-expr params (:left constraint))
-                   right (eval-expr params (:right constraint))
+      :equal (let [left (eval-expr params (:family/lookup-tables family)
+                                    (:left constraint))
+                   right (eval-expr params (:family/lookup-tables family)
+                                     (:right constraint))
                    tolerance (or (:tolerance constraint) 1.0e-9)]
                (when (> (#?(:clj Math/abs :cljs js/Math.abs) (- left right)) tolerance)
                  (throw (ex-info "family equality constraint failed"
@@ -736,11 +772,20 @@
    (let [specs (:family/parameters family)
          type-spec (get-in family [:family/types type-key])
          type-overrides (or (:parameters type-spec) {})
-         formula-names (set (keys (:family/formulas family)))]
+         formula-names (set (keys (:family/formulas family)))
+         reporting-names (into #{} (keep (fn [[name spec]]
+                                           (when (:reporting spec) name))) specs)]
+     (when-let [invalid (first (set/intersection formula-names reporting-names))]
+       (throw (ex-info "reporting parameter cannot also have a formula"
+                       {:parameter invalid})))
      (when-let [formula-override
                 (first (filter formula-names (concat (keys type-overrides) (keys overrides))))]
        (throw (ex-info "formula-driven parameter cannot be overridden"
                        {:parameter formula-override :type type-key})))
+     (when-let [reporting-override
+                (first (filter reporting-names (concat (keys type-overrides) (keys overrides))))]
+       (throw (ex-info "reporting parameter cannot be overridden"
+                       {:parameter reporting-override :type type-key})))
      (when enforce-scopes?
        (doseq [name (keys type-overrides)]
          (when (= :instance (get-in specs [name :scope]))
@@ -751,25 +796,46 @@
      (let [initial (apply dissoc
                           (merge (into {} (map (fn [[k spec]] [k (:default spec)]) specs))
                                  type-overrides overrides)
-                          formula-names)
-           params
-           (loop [params initial pending (:family/formulas family)]
-             (if (empty? pending)
-               params
+                          (set/union formula-names reporting-names))
+           resolve-formulas
+           (fn [params pending]
+             (loop [params params pending pending]
                (let [ready (into {} (filter (fn [[_ expression]]
                                               (every? #(contains? params %)
-                                                      (expression-parameters expression))) pending))]
-                 (when (empty? ready)
-                   (throw (ex-info "family formula dependency cycle or missing parameter"
-                                   {:pending (keys pending)})))
-                 (recur (reduce-kv (fn [result name expression]
-                                     (assoc result name (eval-expr result expression)))
-                                   params ready)
-                        (apply dissoc pending (keys ready))))))]
+                                                      (expression-parameters expression)))
+                                            pending))]
+                 (if (empty? ready)
+                   [params pending]
+                   (recur (reduce-kv
+                           (fn [result name expression]
+                             (assoc result name
+                                    (eval-expr result (:family/lookup-tables family)
+                                               expression)))
+                           params ready)
+                          (apply dissoc pending (keys ready)))))))
+           [pre-plane pending] (resolve-formulas initial (:family/formulas family))
+           planes (resolve-reference-planes family pre-plane)
+           reporting-values
+           (into {}
+                 (map (fn [name]
+                        (let [{:keys [kind from to signed?]}
+                              (get-in specs [name :reporting])
+                              left (get-in planes [from :offset])
+                              right (get-in planes [to :offset])]
+                          (when-not (and (= :distance kind)
+                                         (number? left) (number? right))
+                            (throw (ex-info "unsupported or unresolved reporting parameter"
+                                            {:parameter name
+                                             :reporting (get-in specs [name :reporting])})))
+                          [name (cond-> (- right left) (not signed?) math-abs)])))
+                 reporting-names)
+           [params unresolved] (resolve-formulas (merge pre-plane reporting-values) pending)]
+       (when (seq unresolved)
+         (throw (ex-info "family formula dependency cycle or missing parameter"
+                         {:pending (keys unresolved)})))
        (doseq [[name spec] specs]
          (validate-parameter! name spec (get params name)))
-       (let [planes (resolve-reference-planes family params)]
-         (:parameters (validate-constraints! family params planes)))))))
+       (:parameters (validate-constraints! family params planes))))))
 
 (declare instantiate-family*)
 
@@ -923,9 +989,9 @@
                                                                    :ceil :floor :sin :cos :tan
                                                                    :asin :acos :atan :atan2
                                                                    := :not= :< :<= :> :>=
-                                                                   :if :and :or :not}
+                                                                   :if :and :or :not :lookup}
                                                                   (first %)))
-                                      (eval-expr {} %)
+                                      (eval-expr {} (:family/lookup-tables family) %)
                                       :else %)
                                    (:family/template family))
         body (-> (materialize-template catalog substituted stack context)
