@@ -1,7 +1,8 @@
 (ns bim.integration
   "Portable contracts that connect BIM authoring, drawings, IFC exchange,
   collaboration, and cloud-itonami. All functions are pure and CLJC-safe."
-  (:require [clojure.string :as string]
+  (:require [clojure.set :as set]
+            [clojure.string :as string]
             [clojure.walk :as walk]
             [bim :as bim]
             [ifc.core :as ifc]
@@ -1746,6 +1747,8 @@
                  (:buildings site))})
         (:sites project)))
 
+(declare export-structural-analysis import-structural-analysis)
+
 (defn export-ifc
   "Create a lossless, EDN-native IFC 4.3 semantic exchange document. This is
   the canonical boundary consumed by STEP/JSON adapters; it is not STEP text."
@@ -1764,7 +1767,10 @@
                                                        (:georeference project))
                                      :children (exported-spatial-tree project)}
                               (nil? source) (assoc :model project))
-                   :elements elements})
+                   :elements elements
+                   :structural-analysis
+                   (when-let [model (:structural/model project)]
+                     (export-structural-analysis model))})
         exchange (assoc exchange
                         :ifc/groups (vec (or (:ifc/groups project)
                                              (:ifc/groups source)))
@@ -2064,6 +2070,9 @@
        :ifc/schema (:ifc/schema document) :ifc/source-document document
        :ifc/groups (:ifc/groups document) :ifc/connections (:ifc/connections document)
        :psets {}
+       :structural/model
+       (when-let [structural (:ifc/structural-analysis document)]
+         (import-structural-analysis structural))
        :sites [(assoc
                 (bim/site {:id (or (:id site-node) 1) :name (or (:name site-node) "Site")
                            :geo (when site-node
@@ -2110,6 +2119,129 @@
    :structural/members (vec members) :structural/shells (vec shells)
    :structural/load-cases (vec load-cases)
    :structural/combinations (vec combinations)})
+
+(defn- ifc-load-classification [kind]
+  (case kind
+    :dead [:permanent-g :dead-load-g]
+    :live [:variable-q :live-load-q]
+    :wind [:variable-q :wind-w]
+    :seismic [:extraordinary-a :earthquake-e]
+    :snow [:variable-q :snow-s]
+    [:notdefined :notdefined]))
+
+(defn export-structural-analysis
+  "Map the BIM analytical model into the shared ISO 16739 structural contract."
+  [model]
+  (let [node-by-id (into {} (map (juxt :structural.node/id identity)
+                                  (:structural/nodes model)))
+        nodes (mapv (fn [node]
+                      {:id (:structural.node/id node)
+                       :name (str (:structural.node/id node))
+                       :point (vec (take 3 (concat (:structural.node/point node)
+                                                   (repeat 0.0))))
+                       :restraints (vec (take 6
+                                              (concat (:structural.node/restraints node)
+                                                      (repeat false))))})
+                    (:structural/nodes model))
+        members
+        (mapv (fn [member]
+                (let [start-id (:structural.member/start-node member)
+                      end-id (:structural.member/end-node member)]
+                  {:id (:structural.member/id member)
+                   :name (str (:structural.member/id member))
+                   :start-node start-id :end-node end-id
+                   :start-point (:structural.node/point (get node-by-id start-id))
+                   :end-point (:structural.node/point (get node-by-id end-id))
+                   :predefined-type
+                   (if (= :pin (:structural.member/connection member))
+                     :pin-joined-member :rigid-joined-member)}))
+              (:structural/members model))
+        load-cases
+        (mapv
+         (fn [load-case]
+           (let [case-id (:structural.load-case/id load-case)
+                 [action-type action-source]
+                 (ifc-load-classification (:structural.load-case/kind load-case))
+                 gravity (:structural.load-case/gravity load-case)]
+             {:id case-id :name (:structural.load-case/name load-case)
+              :predefined-type :load-case :action-type action-type
+              :action-source action-source
+              :self-weight-coefficients
+              (if (seq gravity)
+                (mapv #(/ (double %) 9.80665)
+                      (take 3 (concat gravity (repeat 0.0))))
+                [0.0 0.0 0.0])
+              :loads
+              (vec
+               (concat
+                (map-indexed
+                 (fn [index load]
+                   (assoc load :id (or (:id load) (str case-id "-N-" index))))
+                 (:structural.load-case/nodal-loads load-case))
+                (map-indexed
+                 (fn [index load]
+                   (-> load
+                       (assoc :id (or (:id load) (str case-id "-M-" index)))
+                       (set/rename-keys {:fx :qx :fy :qy :fz :qz
+                                         :mx :qmx :my :qmy :mz :qmz})))
+                 (:structural.load-case/member-loads load-case))))}))
+         (:structural/load-cases model))]
+    {:id (or (:structural/id model) :structural-model)
+     :name (or (:structural/name model) "Structural Analysis Model")
+     :predefined-type (if (= 2 (count (:structural.node/point (first (:structural/nodes model)))))
+                        :in-plane-loading-2d :loading-3d)
+     :nodes nodes :members members :load-cases load-cases
+     :combinations
+     (mapv (fn [combination]
+             {:id (:structural.combination/id combination)
+              :name (:structural.combination/name combination)
+              :factors (:structural.combination/factors combination)})
+           (:structural/combinations model))}))
+
+(defn import-structural-analysis
+  "Restore the shared ISO 16739 structural contract as an executable BIM model."
+  [structural]
+  (structural-model
+   {:nodes
+    (mapv (fn [node]
+            (structural-node {:id (:id node) :point (:point node)
+                              :restraints (:restraints node)}))
+          (:nodes structural))
+    :members
+    (mapv (fn [member]
+            (structural-analysis-member
+             {:id (:id member) :start-node (:start-node member)
+              :end-node (:end-node member)}))
+          (:members structural))
+    :load-cases
+    (mapv (fn [load-case]
+            (let [loads (:loads load-case)
+                  gravity (mapv #(* 9.80665 (double %))
+                                (:self-weight-coefficients load-case))]
+              (structural-load-case
+               {:id (:id load-case) :name (:name load-case)
+                :kind (case (:action-source load-case)
+                        :dead-load-g :dead :live-load-q :live :wind-w :wind
+                        :earthquake-e :seismic :snow-s :snow :service)
+                :gravity gravity
+                :nodal-loads (mapv #(dissoc % :id :name :global-id :placement
+                                             :global-or-local :destabilizing-load)
+                                   (filter :node loads))
+                :member-loads
+                (mapv #(-> %
+                           (dissoc :id :name :global-id :placement
+                                   :global-or-local :destabilizing-load
+                                   :projected-or-true :predefined-type)
+                           (set/rename-keys {:qx :fx :qy :fy :qz :fz
+                                             :qmx :mx :qmy :my :qmz :mz}))
+                      (filter :member loads))})))
+          (:load-cases structural))
+    :combinations
+    (mapv (fn [combination]
+            (structural-load-combination
+             {:id (:id combination) :name (:name combination)
+              :factors (:factors combination)}))
+          (:combinations structural))}))
 
 (defn validate-structural-model [model]
   (let [node-list (:structural/nodes model)

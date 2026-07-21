@@ -902,6 +902,42 @@
     (is (= [0.0 0.0 -9.80665]
            (get-in model [:structural/load-cases 0 :structural.load-case/gravity])))))
 
+(deftest structural-model-round-trips-through-standard-ifc-analysis-entities
+  (let [model
+        (integration/structural-model
+         {:nodes [(integration/structural-node
+                   {:id :n1 :point [0.0 0.0 0.0]
+                    :restraints [true true true]})
+                  (integration/structural-node
+                   {:id :n2 :point [5.0 0.0 0.0]
+                    :restraints [false false false]})]
+          :members [(integration/structural-analysis-member
+                     {:id :m1 :start-node :n1 :end-node :n2
+                      :area-m2 0.02 :elastic-modulus-pa 2.0e11})]
+          :load-cases [(integration/structural-load-case
+                        {:id :dead :name "Dead" :kind :dead
+                         :gravity [0.0 0.0 -9.80665]
+                         :nodal-loads [{:node :n2 :fz -10000.0}]
+                         :member-loads [{:member :m1 :fy -2500.0}]})]
+          :combinations [(integration/structural-load-combination
+                          {:id :uls :name "ULS" :factors {:dead 1.35}})]})
+        project (assoc (bim/project "IFC Structure") :structural/model model)
+        spf (ifc/write-standard-spf project)
+        imported (:structural/model (integration/import-ifc-spf spf))]
+    (is (string/includes? spf "IFCSTRUCTURALANALYSISMODEL"))
+    (is (= 2 (count (:structural/nodes imported))))
+    (is (= [true true true false false false]
+           (get-in imported [:structural/nodes 0 :structural.node/restraints])))
+    (is (= 1 (count (:structural/members imported))))
+    (is (= -10000.0
+           (get-in imported [:structural/load-cases 0
+                             :structural.load-case/nodal-loads 0 :fz])))
+    (is (= -2500.0
+           (get-in imported [:structural/load-cases 0
+                             :structural.load-case/member-loads 0 :fy])))
+    (is (= 1.35 (-> imported :structural/combinations first
+                    :structural.combination/factors vals first)))))
+
 (deftest transfers-area-wind-and-seismic-loads-to-analytical-nodes
   (let [points {:b1 [0 0 0] :b2 [6 0 0] :b3 [6 4 0] :b4 [0 4 0]
                 :t1 [0 0 3] :t2 [6 0 3] :t3 [6 4 3] :t4 [0 4 3]}
