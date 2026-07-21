@@ -772,6 +772,35 @@
     (is (= "Ss_25_10" (get-in payload [:design/line-items 0 :classification/code])))
     (is (= 7 (:design/revision payload)))))
 
+(deftest drawing-sets-regenerate-associative-graphics-and-schedules
+  (let [project (integrated-project)
+        generated (integration/generate-drawing-set project)
+        dimension (integration/drawing-annotation
+                   {:id :wall-length :kind :dimension :from [0 0] :to [1 0]
+                    :references [{:element-id 10 :anchor :start}
+                                 {:element-id 10 :anchor :end}]})
+        drawing-set (update-in generated [:drawing/views 0]
+                               integration/add-view-annotation dimension)
+        changed (-> project
+                    (bim/update-element 3 10 assoc-in [:geometry :axis 1] [12 0 0])
+                    (bim/add-element 3 (bim/element {:id 11 :kind :door :name "D01"})))
+        regenerated (integration/regenerate-drawing-set changed drawing-set)
+        without-storey (assoc-in changed [:sites 0 :buildings 0 :storeys] [])
+        orphaned (integration/regenerate-drawing-set without-storey regenerated)]
+    (is (= 2 (:drawing/generation regenerated)))
+    (is (= [12 0] (get-in regenerated [:drawing/views 0 :view/annotations 0 :to])))
+    (is (= 12.0 (get-in regenerated [:drawing/views 0 :view/annotations 0 :value])))
+    (is (= :associated
+           (get-in regenerated [:drawing/views 0 :view/annotations 0
+                                :annotation/association-status])))
+    (is (= 2 (get-in regenerated [:drawing/schedules 0 :schedule/total-count])))
+    (is (= 2 (get-in regenerated [:drawing/views 0 :view/model-element-count])))
+    (is (= [] (get-in regenerated [:drawing/sheets 0 :sheet/missing-references])))
+    (is (= :orphaned (get-in orphaned [:drawing/views 0 :view/model-status])))
+    (is (= :orphaned
+           (get-in orphaned [:drawing/views 0 :view/annotations 0
+                             :annotation/association-status])))))
+
 (deftest collaboration-review-issue-and-cloud-itonami-delta
   (let [project (integrated-project)
         initial (integration/collaboration-workspace project)

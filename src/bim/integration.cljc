@@ -1432,12 +1432,64 @@
         schedules [(element-schedule {:id "schedule-elements" :name "Element Schedule"
                                       :elements (all-elements project)})]]
     {:drawing/schema-version schema-version
+     :drawing/generation 1
      :drawing/views views
      :drawing/schedules schedules
      :drawing/sheets [(drawing-sheet {:id "A-001" :number "A-001"
                                       :name "General Arrangements"
                                       :views (conj (mapv :view/id views) "schedule-elements")
                                       :revisions [{:revision "P01" :status :preliminary}]})]}))
+
+(defn regenerate-drawing-set
+  "Regenerate a persistent drawing set against the current BIM model. View
+  identity, templates, manual annotations, sheet placement, and revisions are
+  preserved; associative annotations and schedules are recomputed. References
+  whose model/view target disappeared are retained and explicitly orphaned."
+  [project drawing-set]
+  (let [storeys (all-storeys project)
+        buildings (mapcat :buildings (:sites project))
+        storeys-by-id (into {} (map (juxt :id identity)) storeys)
+        buildings-by-id (into {} (map (juxt :id identity)) buildings)
+        view-elements
+        (fn [view]
+          (case (:view/kind view)
+            :floor-plan (some-> (get storeys-by-id (:view/storey-id view)) :elements)
+            (:section :elevation :detail)
+            (some->> (get buildings-by-id (:view/building-id view))
+                     :storeys (mapcat :elements))
+            []))
+        views
+        (mapv (fn [view]
+                (let [elements (view-elements view)
+                      target-exists?
+                      (case (:view/kind view)
+                        :floor-plan (contains? storeys-by-id (:view/storey-id view))
+                        (:section :elevation :detail)
+                        (contains? buildings-by-id (:view/building-id view))
+                        true)]
+                  (-> (reassociate-view-annotations view (or elements []))
+                      (assoc :view/model-status (if target-exists? :current :orphaned)
+                             :view/model-element-count (count elements)))))
+              (:drawing/views drawing-set))
+        elements (all-elements project)
+        schedules
+        (mapv (fn [schedule]
+                (element-schedule
+                 {:id (:schedule/id schedule) :name (:schedule/name schedule)
+                  :elements elements :fields (:schedule/fields schedule)
+                  :group-by (:schedule/group-by schedule)}))
+              (:drawing/schedules drawing-set))
+        known-references (set (concat (map :view/id views) (map :schedule/id schedules)))
+        sheets
+        (mapv (fn [sheet]
+                (let [references (vec (or (:sheet/views sheet)
+                                          (map :viewport/view-id (:sheet/viewports sheet))))]
+                  (assoc sheet :sheet/missing-references
+                         (into [] (remove known-references) references))))
+              (:drawing/sheets drawing-set))]
+    (assoc drawing-set
+           :drawing/generation (inc (or (:drawing/generation drawing-set) 0))
+           :drawing/views views :drawing/schedules schedules :drawing/sheets sheets)))
 
 (defn- exported-geometry [element]
   (let [geometry (:geometry element)]
