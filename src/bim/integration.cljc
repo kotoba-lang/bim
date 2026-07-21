@@ -5,6 +5,7 @@
             [clojure.string :as string]
             [clojure.walk :as walk]
             [bim :as bim]
+            [bim.mep :as mep]
             [bim.structural :as structural]
             [ifc.core :as ifc]
             [kotoba.document.change :as document-change]
@@ -3807,6 +3808,55 @@
       (throw (ex-info "sized MEP system produced an invalid connector graph"
                       {:issues issues})))
     {:mep.design/system resized-system :mep.design/analysis analysis}))
+
+(defn analyze-closed-authored-mep-system
+  "Solve an authored round MEP network including loops and write signed edge
+  flow and pressure drop results back to every segment."
+  [system source-pressures terminal-demands fluid options]
+  (when-let [issues (seq (validate-mep-system system))]
+    (throw (ex-info "invalid MEP system" {:issues issues})))
+  (let [fitting-by-node (into {} (keep (fn [fitting]
+                                         (when-let [node (:mep/node-id fitting)]
+                                           [node fitting]))
+                                       (:mep/fittings system)))
+        edges
+        (mapv (fn [segment]
+                (let [[start end] (get-in segment [:geometry :directrix])
+                      diameter (* 2.0 (get-in segment [:geometry :radius]))
+                      from (:mep/from-node segment) to (:mep/to-node segment)]
+                  (when-not (and from to start end (pos? diameter))
+                    (throw (ex-info "closed MEP analysis requires round node-linked segments"
+                                    {:segment (:id segment)})))
+                  (merge fluid
+                         {:id (:id segment) :from from :to to
+                          :length-m (vector-length (vector-sub end start))
+                          :diameter-m diameter
+                          :minor-loss-coefficient
+                          (default-fitting-loss-coefficient (fitting-by-node from))})))
+              (:mep/segments system))
+        nodes (vec (distinct (mapcat (juxt :from :to) edges)))
+        analysis
+        (mep/solve-closed-fluid-network
+         {:nodes nodes :edges edges :source-pressures source-pressures
+          :demands terminal-demands :initial-pressures (:initial-pressures options)}
+         (dissoc options :initial-pressures))
+        flows (:fluid.network/edge-flows-m3-s analysis)
+        pressures (:fluid.network/pressures-pa analysis)
+        segments
+        (mapv (fn [segment]
+                (let [flow (flows (:id segment))
+                      from (:mep/from-node segment) to (:mep/to-node segment)]
+                  (assoc segment :mep/flow-m3-s flow
+                                 :mep/flow-direction (if (neg? flow) :reverse :forward)
+                                 :mep/from-pressure-pa (pressures from)
+                                 :mep/to-pressure-pa (pressures to)
+                                 :mep/pressure-drop-pa (- (pressures from) (pressures to)))))
+              (:mep/segments system))]
+    {:mep.design/system (assoc system :mep/segments segments
+                                      :mep/design-flow
+                                      (reduce + (vals (:fluid.network/source-flows-m3-s
+                                                       analysis))))
+     :mep.design/analysis analysis}))
 
 (defn analyze-mep-system
   "Build the connector graph and calculate Darcy-Weisbach loss for each

@@ -1368,6 +1368,34 @@
     (is (pos? (get-in design [:mep.design/analysis :mep.network/segments 1
                               :mep/minor-pressure-loss-pa])))))
 
+(deftest authored-mep-loop-solves-and-retains-segment-pressure-results
+  (let [assembly
+        (mep/network-assembly
+         {:id "ring" :system-id :ring :domain :piping :default-size 0.1
+          :nodes {:source {:point [0 0 0]} :left {:point [2 2 0]}
+                  :right {:point [2 -2 0]} :terminal {:point [4 0 0]}}
+          :edges [{:id :sl :from :source :to :left}
+                  {:id :lt :from :left :to :terminal}
+                  {:id :sr :from :source :to :right}
+                  {:id :rt :from :right :to :terminal}]})
+        system (integration/mep-system
+                {:id :ring :name "Ring" :kind :hydronic :medium :water
+                 :segments (:mep.assembly/segments assembly)
+                 :fittings (:mep.assembly/fittings assembly)})
+        design
+        (integration/analyze-closed-authored-mep-system
+         system {:source 100000.0} {:terminal 0.01}
+         {:density-kg-m3 998.0 :friction-factor 0.02}
+         {:tolerance-m3-s 1.0e-9})
+        sized (:mep.design/system design)]
+    (is (empty? (integration/validate-mep-system sized)))
+    (is (< (#?(:clj Math/abs :cljs js/Math.abs) (- 0.01 (:mep/design-flow sized)))
+           1.0e-9))
+    (is (every? number? (map :mep/flow-m3-s (:mep/segments sized))))
+    (is (every? pos? (map :mep/pressure-drop-pa (:mep/segments sized))))
+    (is (< (get-in design [:mep.design/analysis
+                           :fluid.network/maximum-residual-m3-s]) 1.0e-9))))
+
 (deftest sizes-and-calculates-rectangular-duct-pressure-loss
   (let [sizing (integration/size-rectangular-duct
                 1.2 6.0 [[0.3 0.2] [0.4 0.25] [0.5 0.4] [0.6 0.4]])
