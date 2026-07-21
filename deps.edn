@@ -13,7 +13,7 @@
          :git/sha "85ed9094977ea3744edfa892a59cfd19dd3be8d1"}
         io.github.kotoba-lang/document-contracts
         {:git/url "https://github.com/kotoba-lang/kotoba-document-contracts.git"
-         :git/sha "54ef0873bbc41aff75577441fce15a046a1cc668"}
+         :git/sha "b86e7bee77cd55712c29e7a55ac9014786fb2364"}
         io.github.kotoba-lang/dxf
         {:git/url "https://github.com/kotoba-lang/dxf.git"
          :git/sha "95daf62df6e14373077bdce3a0cffc038a7250b6"}
