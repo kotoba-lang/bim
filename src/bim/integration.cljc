@@ -2793,6 +2793,17 @@
     (assoc result :structural.analysis/load-case nil
                   :structural.analysis/combination combination-id)))
 
+(defn- six-dof-restraints
+  "Expand translational-only [ux uy uz] restraints (as `generate-structural-model`
+  authors, matching the truss/pin-jointed convention) to the six-DOF
+  [ux uy uz rx ry rz] shape the space-frame solver requires, leaving
+  rotations free (pinned base). Already-six-DOF restraints pass through
+  unchanged so hand-authored frame models keep their real fixity."
+  [restraints]
+  (if (= 6 (count restraints))
+    restraints
+    (vec (take 6 (concat restraints (repeat false))))))
+
 (defn analyze-3d-frame-model
   "Run the six-DOF space-frame solver through the canonical BIM structural model."
   [model load-case-id]
@@ -2804,7 +2815,8 @@
          {:nodes (mapv (fn [node]
                          {:id (:structural.node/id node)
                           :point (:structural.node/point node)
-                          :restraints (:structural.node/restraints node)})
+                          :restraints (six-dof-restraints
+                                       (:structural.node/restraints node))})
                        (:structural/nodes model))
           :members
           (mapv (fn [member]
@@ -2992,6 +3004,36 @@
       (throw (ex-info "structural section dimensions must be positive" {:section section})))
     (merge section properties)))
 
+(defn structural-torsion-constant
+  "Saint-Venant torsional constant J in m^4 for the section kinds this
+  library authors. Circular sections use the exact polar moment; rectangular
+  and I sections use the standard closed-form engineering approximations
+  (Roark's solid-rectangle formula; sum-of-b*t^3/3 for open thin-walled I
+  sections). `section` must already carry `structural-section-properties`'
+  input dimensions (width-m/depth-m, diameter-m, or the overall/web/flange
+  I-shape keys)."
+  [section]
+  (case (:kind section)
+    :circle (/ (* pi (pow (:diameter-m section) 4.0)) 32.0)
+    :rectangle
+    (let [long (max (:width-m section) (:depth-m section))
+          short (min (:width-m section) (:depth-m section))]
+      (* long short short short
+         (- (/ 1.0 3.0)
+            (* 0.21 (/ short long)
+               (- 1.0 (/ (pow short 4.0) (* 12.0 (pow long 4.0))))))))
+    :i-shape
+    (let [flange (:flange-thickness-m section) web (:web-thickness-m section)
+          web-depth (- (:overall-depth-m section) (* 2.0 flange))]
+      (+ (* 2.0 (/ (* (:overall-width-m section) flange flange flange) 3.0))
+         (/ (* web-depth web web web) 3.0)))
+    (throw (ex-info "unsupported structural section" {:section section}))))
+
+(defn structural-shear-modulus
+  "Isotropic shear modulus from elastic modulus and Poisson's ratio."
+  [elastic-modulus-pa poissons-ratio]
+  (/ elastic-modulus-pa (* 2.0 (+ 1.0 poissons-ratio))))
+
 (defn simply-supported-beam-check
   "Elastic strong-axis check for a simply supported prismatic beam under a
   uniform line load. Combines axial and bending stress and checks service
@@ -3079,7 +3121,8 @@
              :or {tolerance-m 1.0e-6
                   default-section {:kind :rectangle :width-m 0.2 :depth-m 0.3}
                   default-material {:name "Structural Steel" :elastic-modulus-pa 2.0e11
-                                    :yield-strength-pa 2.5e8 :density-kg-m3 7850.0}}}]
+                                    :yield-strength-pa 2.5e8 :density-kg-m3 7850.0
+                                    :poissons-ratio 0.3}}}]
    (when-not (and (number? tolerance-m) (pos? tolerance-m))
      (throw (ex-info "structural node tolerance must be positive"
                      {:tolerance-m tolerance-m})))
@@ -3125,7 +3168,13 @@
                       :material (:name material)
                       :elastic-modulus-pa (:elastic-modulus-pa material)
                       :yield-strength-pa (:yield-strength-pa material)
-                      :density-kg-m3 (:density-kg-m3 material)})
+                      :density-kg-m3 (:density-kg-m3 material)
+                      :shear-modulus-pa (structural-shear-modulus
+                                         (:elastic-modulus-pa material)
+                                         (:poissons-ratio material))
+                      :torsion-m4 (structural-torsion-constant section)
+                      :inertia-y-m4 (:strong-inertia-m4 section)
+                      :inertia-z-m4 (:weak-inertia-m4 section)})
                     :structural.member/source-element-id (:id element)
                     :structural.member/role (:structural/role element))))
                line-elements)

@@ -955,6 +955,80 @@
     (is (= [0.0 0.0 -9.80665]
            (get-in model [:structural/load-cases 0 :structural.load-case/gravity])))))
 
+(deftest torsion-constant-matches-known-solid-section-references
+  (is (< (#?(:clj Math/abs :cljs js/Math.abs)
+          (- (integration/structural-torsion-constant {:kind :circle :diameter-m 0.1})
+             9.8175e-6))
+         1.0e-9))
+  (let [square (integration/structural-torsion-constant
+                {:kind :rectangle :width-m 0.2 :depth-m 0.2})]
+    ;; exact series solution for a square is ~0.1406*a^4; Roark's closed-form
+    ;; approximation used here lands within ~0.2% of it.
+    (is (< (#?(:clj Math/abs :cljs js/Math.abs)
+            (- square (* 0.1406 (#?(:clj Math/pow :cljs js/Math.pow) 0.2 4))))
+           1.0e-6)))
+  (let [i-section (integration/structural-torsion-constant
+                    {:kind :i-shape :overall-width-m 0.15 :overall-depth-m 0.3
+                     :web-thickness-m 0.008 :flange-thickness-m 0.012})
+        equivalent-solid (integration/structural-torsion-constant
+                           {:kind :rectangle :width-m 0.15 :depth-m 0.3})]
+    (is (pos? i-section))
+    ;; an open thin-walled I section is far more torsionally flexible than
+    ;; an equivalent solid rectangle of the same overall envelope.
+    (is (< i-section equivalent-solid))))
+
+(deftest shear-modulus-follows-isotropic-elasticity-relation
+  (is (< (#?(:clj Math/abs :cljs js/Math.abs)
+          (- (integration/structural-shear-modulus 2.0e11 0.3) 7.6923e10))
+         1.0e6)))
+
+(deftest generated-structural-model-supports-3d-frame-analysis
+  (let [beam (integration/structural-member
+              (bim/element {:id 290 :kind :beam :name "B1"
+                            :geometry {:axis [[0 0 3] [6 0 3]]}})
+              {:role :beam :analytical-axis [[0 0 3] [6 0 3]]
+               :section {:kind :rectangle :width-m 0.25 :depth-m 0.5}
+               :material {:name "Steel" :elastic-modulus-pa 2.0e11
+                          :yield-strength-pa 3.55e8 :density-kg-m3 7850}})
+        column-a (integration/structural-member
+                  (bim/element {:id 291 :kind :column :name "C1"
+                                :geometry {:axis [[0 0 0] [0 0 3]]}})
+                  {:role :column :analytical-axis [[0 0 0] [0 0 3]]})
+        column-b (integration/structural-member
+                  (bim/element {:id 292 :kind :column :name "C2"
+                                :geometry {:axis [[6 0 0] [6 0 3]]}})
+                  {:role :column :analytical-axis [[6 0 0] [6 0 3]]})
+        storey (bim/storey {:id 4 :name "Frame storey" :elevation 0 :height 3
+                            :placement :identity :spaces []
+                            :elements [beam column-a column-b]})
+        project (-> (bim/project "3D Frame")
+                    (update :sites conj
+                            (bim/site {:id 1 :name "Site" :placement :identity
+                                       :buildings [(bim/building
+                                                    {:id 2 :name "Frame" :placement :identity
+                                                     :reference-elevation 0 :storeys [storey]})]})))
+        loaded (integration/structural-load-case
+                {:id :point-load :name "Beam line load" :member-loads [{:member 290 :qz -5000.0}]})
+        combination (integration/structural-load-combination
+                     {:id :service :name "Service" :kind :service :factors {:point-load 1.0}})
+        model (integration/generate-structural-model
+               project {:load-cases [loaded] :combinations [combination]})
+        member (first (filter #(= 290 (:structural.member/id %)) (:structural/members model)))]
+    (is (pos? (:structural.member/shear-modulus-pa member)))
+    (is (pos? (:structural.member/torsion-m4 member)))
+    (is (pos? (:structural.member/inertia-y-m4 member)))
+    (is (pos? (:structural.member/inertia-z-m4 member)))
+    (let [analysis (integration/analyze-3d-frame-combination model :service)
+          reactions (vals (:structural.analysis/reactions analysis))
+          displacements (vals (:structural.analysis/displacements analysis))]
+      (is (= :frame-3d (:structural.analysis/kind analysis)))
+      (is (every? #(= 6 (count %)) reactions))
+      (is (every? #(= 6 (count %)) displacements))
+      ;; the downward beam line load must be carried into vertical column
+      ;; base reactions, and the beam must actually deflect under it.
+      (is (< 0.0 (reduce + (map #(nth % 2) reactions))))
+      (is (some #(neg? (nth % 2)) displacements)))))
+
 (deftest structural-model-round-trips-through-standard-ifc-analysis-entities
   (let [model
         (integration/structural-model
