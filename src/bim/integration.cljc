@@ -2871,8 +2871,42 @@
      :structural.analysis/member-axial-forces
      (into {} (map (fn [[id result]] [id (:force-n result)]) members))}))
 
+(defn structural-member-utilization
+  "Elastic combined axial + biaxial bending stress check at both member
+  ends, checked against a factored yield stress. `my`/`mz` bend about the
+  member's local y/z axes, which `generate-structural-model` assigns
+  strong-inertia-m4/weak-inertia-m4 respectively, so they check against
+  strong-modulus-m3/weak-modulus-m3 in the same order. This is a
+  simplified elastic unity check -- it does not cover torsion, shear,
+  lateral-torsional buckling, or second-order/P-delta effects, so it is
+  not a substitute for a full code interaction equation (e.g. AISC H1)."
+  [member local-end-forces]
+  (let [area (:structural.member/area-m2 member)
+        yield (:structural.member/yield-strength-pa member)
+        factor (:structural.member/resistance-factor member)
+        section (:structural.member/section member)
+        strong-modulus (:strong-modulus-m3 section)
+        weak-modulus (:weak-modulus-m3 section)]
+    (when (and (pos? (or area 0.0)) (pos? (or yield 0.0)) (pos? (or factor 0.0))
+               (pos? (or strong-modulus 0.0)) (pos? (or weak-modulus 0.0)))
+      (let [resistance (* factor yield)
+            end-stress (fn [n my mz]
+                         (+ (/ (math-abs (or n 0.0)) area)
+                            (/ (math-abs (or my 0.0)) strong-modulus)
+                            (/ (math-abs (or mz 0.0)) weak-modulus)))
+            stress (max (end-stress (:n1 local-end-forces) (:my1 local-end-forces)
+                                    (:mz1 local-end-forces))
+                        (end-stress (:n2 local-end-forces) (:my2 local-end-forces)
+                                    (:mz2 local-end-forces)))
+            utilization (/ stress resistance)]
+        {:combined-stress-pa stress :resistance-pa resistance
+         :utilization utilization :passes? (<= utilization 1.0)}))))
+
 (defn analyze-3d-frame-combination
-  "Linearly combine canonical 3D frame load-case results."
+  "Linearly combine canonical 3D frame load-case results and check combined
+  axial + biaxial bending member utilization (see
+  `structural-member-utilization` for what this check does and does not
+  cover)."
   [model combination-id]
   (let [combination (or (first (filter #(= combination-id (:structural.combination/id %))
                                        (:structural/combinations model)))
@@ -2883,9 +2917,19 @@
                                 [case-id (analyze-3d-frame-model model case-id)])
                               (keys factors)))
         combined (:structural.combination/result
-                  (structural/combine-results combination-id results factors))]
+                  (structural/combine-results combination-id results factors))
+        member-by-id (into {} (map (juxt :structural.member/id identity)
+                                   (:structural/members model)))
+        checks
+        (into {}
+              (keep (fn [[id result]]
+                      (when-let [check (structural-member-utilization
+                                        (member-by-id id) (:local-end-forces result))]
+                        [id check])))
+              (:structural.analysis/member-results combined))]
     (assoc combined :structural.analysis/load-case nil
-                    :structural.analysis/combination combination-id)))
+                    :structural.analysis/combination combination-id
+                    :structural.analysis/member-checks checks)))
 
 (defn analyze-structural-combination
   "Analyze a factored load combination and check axial member resistance."

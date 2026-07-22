@@ -982,6 +982,28 @@
           (- (integration/structural-shear-modulus 2.0e11 0.3) 7.6923e10))
          1.0e6)))
 
+(deftest member-utilization-combines-axial-and-biaxial-bending-stress
+  (let [member {:structural.member/area-m2 0.01
+                :structural.member/yield-strength-pa 2.5e8
+                :structural.member/resistance-factor 0.9
+                :structural.member/section {:strong-modulus-m3 0.001
+                                            :weak-modulus-m3 0.0005}}
+        governing (integration/structural-member-utilization
+                   member {:n1 1000.0 :my1 2000.0 :mz1 500.0
+                          :n2 0.0 :my2 0.0 :mz2 0.0})]
+    (is (= 3100000.0 (:combined-stress-pa governing)))
+    (is (= 2.25e8 (:resistance-pa governing)))
+    (is (< (#?(:clj Math/abs :cljs js/Math.abs)
+            (- (:utilization governing) (/ 3100000.0 2.25e8)))
+           1.0e-9))
+    (is (true? (:passes? governing)))
+    (is (false? (:passes? (integration/structural-member-utilization
+                            member {:n1 0.0 :my1 300000.0 :mz1 0.0
+                                   :n2 0.0 :my2 0.0 :mz2 0.0}))))
+    (is (nil? (integration/structural-member-utilization
+               (dissoc member :structural.member/yield-strength-pa)
+               {:n1 1000.0 :my1 0.0 :mz1 0.0 :n2 0.0 :my2 0.0 :mz2 0.0})))))
+
 (deftest generated-structural-model-supports-3d-frame-analysis
   (let [beam (integration/structural-member
               (bim/element {:id 290 :kind :beam :name "B1"
@@ -1027,7 +1049,18 @@
       ;; the downward beam line load must be carried into vertical column
       ;; base reactions, and the beam must actually deflect under it.
       (is (< 0.0 (reduce + (map #(nth % 2) reactions))))
-      (is (some #(neg? (nth % 2)) displacements)))))
+      (is (some #(neg? (nth % 2)) displacements))
+      (let [checks (:structural.analysis/member-checks analysis)
+            beam-check (checks 290)]
+        (is (= #{290 291 292} (set (keys checks))))
+        (is (pos? (:combined-stress-pa beam-check)))
+        (is (pos? (:utilization beam-check)))
+        (is (true? (:passes? beam-check)))
+        (let [overlay (integration/structural-result-overlay model analysis)
+              beam-overlay (first (filter #(= 290 (:structural.overlay/member-id %))
+                                          (:structural.overlay/members overlay)))]
+          (is (= (:utilization beam-check) (:structural.overlay/utilization beam-overlay)))
+          (is (true? (:structural.overlay/passes? beam-overlay))))))))
 
 (deftest structural-model-round-trips-through-standard-ifc-analysis-entities
   (let [model
