@@ -2152,7 +2152,11 @@
                                           :width 1.0 :height 2.1})
         wall-a (bim/add-opening-to-wall
                 (bim/wall {:id 101 :start [0 0 0] :end [6 0 0] :height 3.0}) opening)
-        wall-b (bim/wall {:id 102 :start [0 2 0] :end [6 2 0] :height 3.0})
+        ;; wall-b extends 2m further in x than wall-a so its projected
+        ;; section-view silhouette is only partly (not fully) covered by
+        ;; wall-a's nearer silhouette -- it stays visible under hidden-line
+        ;; culling instead of being (correctly) dropped as fully hidden.
+        wall-b (bim/wall {:id 102 :start [0 2 0] :end [8 2 0] :height 3.0})
         slab (bim/slab {:id 103 :boundary [[0 0 0] [6 0 0] [6 4 0] [0 4 0]]
                         :thickness 0.2})
         storey (bim/storey {:id 10 :name "Ground" :elevation 0 :height 3
@@ -2263,6 +2267,50 @@
     (is (re-find #"#ff0000" plan-svg))
     (is (< (count (re-seq #"data-element-id=" hidden))
            (count (re-seq #"data-element-id=" wire))))))
+
+(deftest convex-hull-and-polygon-clip-primitives
+  (is (= [[0 0] [4 0] [4 4] [0 4]]
+         (drawing/convex-hull-2d [[0 0] [4 0] [4 4] [0 4] [2 2]])))
+  (is (= [[0 0] [4 0] [2 4]] (drawing/convex-hull-2d [[0 0] [4 0] [2 4]])))
+  (is (= 16.0 (drawing/polygon-area-2d [[0.0 0.0] [4.0 0.0] [4.0 4.0] [0.0 4.0]])))
+  (is (= 8.0 (drawing/polygon-area-2d [[0.0 0.0] [4.0 0.0] [2.0 4.0]])))
+  (let [overlap (drawing/sutherland-hodgman-clip
+                 [[0.0 0.0] [4.0 0.0] [4.0 4.0] [0.0 4.0]]
+                 [[2.0 2.0] [6.0 2.0] [6.0 6.0] [2.0 6.0]])]
+    (is (= 4.0 (drawing/polygon-area-2d overlap))))
+  (is (empty? (drawing/sutherland-hodgman-clip
+               [[100.0 100.0] [104.0 100.0] [104.0 104.0] [100.0 104.0]]
+               [[2.0 2.0] [6.0 2.0] [6.0 6.0] [2.0 6.0]])))
+  ;; a rotated (diamond) footprint mostly overlapping an axis-aligned box:
+  ;; axis-aligned bounding-box containment would miss this entirely (the
+  ;; diamond's AABB [0,0]-[4,4] is not a subset of the box's [1,1]-[3,3],
+  ;; nor vice versa), but the box is exactly the diamond's inscribed
+  ;; square, so real polygon overlap correctly finds it fully covered.
+  (let [diamond [[2.0 0.0] [4.0 2.0] [2.0 4.0] [0.0 2.0]]
+        box [[1.0 1.0] [3.0 1.0] [3.0 3.0] [1.0 3.0]]]
+    (is (= 4.0 (drawing/polygon-area-2d (drawing/sutherland-hodgman-clip diamond box))))))
+
+(deftest hidden-line-section-view-culls-fully-occluded-projected-elements
+  ;; wall-b sits directly behind wall-a (same x-extent and height, greater
+  ;; y-depth) with no opening, so their projected section-view silhouettes
+  ;; coincide -- a genuinely fully-hidden element, unlike the axis-aligned
+  ;; bounding-box "strict subset" test this replaces, which never applied
+  ;; to section views (only elevations) at all.
+  (let [wall-a (bim/wall {:id 501 :start [0 0 0] :end [6 0 0] :height 3.0})
+        wall-b (bim/wall {:id 502 :start [0 2 0] :end [6 2 0] :height 3.0})
+        storey (bim/storey {:id 50 :name "Occlusion" :elevation 0 :height 3
+                            :placement :identity :spaces [] :elements [wall-a wall-b]})
+        building (bim/building {:id 51 :name "Occlusion Building" :placement :identity
+                                :reference-elevation 0 :storeys [storey]})
+        culled (drawing/orthographic-view-svg
+                building {:kind :section :axis :x :cut-position 0.0 :depth 3.0
+                          :hidden-line? true})
+        shown (drawing/orthographic-view-svg
+               building {:kind :section :axis :x :cut-position 0.0 :depth 3.0
+                         :hidden-line? false})]
+    (is (re-find (re-pattern "data-element-id=\"501\"") culled))
+    (is (not (re-find (re-pattern "data-element-id=\"502\"") culled)))
+    (is (re-find (re-pattern "data-element-id=\"502\"") shown))))
 
 (deftest plan-view-range-and-sheet-print-settings
   (let [lower (bim/wall {:id 240 :name "Lower" :start [0 0 0] :end [4 0 0]

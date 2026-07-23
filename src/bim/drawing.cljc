@@ -11,6 +11,76 @@
       {:min [(reduce min xs) (reduce min ys)] :max [(reduce max xs) (reduce max ys)]}
       {:min [0.0 0.0] :max [10.0 10.0]})))
 
+(defn- cross-2d
+  "Signed area (x2) of the triangle o,a,b: positive when o->a->b turns left
+  (counter-clockwise), negative when it turns right, zero when collinear."
+  [[ox oy] [ax ay] [bx by]]
+  (- (* (- ax ox) (- by oy)) (* (- ay oy) (- bx ox))))
+
+(defn convex-hull-2d
+  "2D convex hull via Andrew's monotone chain, returned as a
+  counter-clockwise polygon with no repeated closing point. Degenerate
+  input (fewer than 3 distinct points, or all collinear) returns the
+  distinct input points sorted lexicographically."
+  [points]
+  (let [sorted (vec (sort-by (fn [[x y]] [x y]) (distinct points)))]
+    (if (< (count sorted) 3)
+      sorted
+      (let [build (fn [pts]
+                    (reduce (fn [hull point]
+                              (loop [hull hull]
+                                (if (and (>= (count hull) 2)
+                                         (<= (cross-2d (nth hull (- (count hull) 2))
+                                                       (peek hull) point) 0.0))
+                                  (recur (pop hull))
+                                  (conj hull point))))
+                            [] pts))
+            lower (build sorted)
+            upper (build (rseq sorted))]
+        (vec (concat (pop lower) (pop upper)))))))
+
+(defn polygon-area-2d
+  "Shoelace-formula area of a (not necessarily convex) simple polygon."
+  [polygon]
+  (if (< (count polygon) 3)
+    0.0
+    (/ (#?(:clj Math/abs :cljs js/Math.abs)
+        (reduce + (map (fn [[[x1 y1] [x2 y2]]] (- (* x1 y2) (* x2 y1)))
+                       (map vector polygon (concat (rest polygon) [(first polygon)])))))
+       2.0)))
+
+(defn- line-intersection-2d
+  "Intersection of segment p1-p2 with the infinite line through a,b."
+  [p1 p2 a b]
+  (let [[x1 y1] p1 [x2 y2] p2
+        d1 (cross-2d a b p1) d2 (cross-2d a b p2)
+        t (/ d1 (- d1 d2))]
+    [(+ x1 (* t (- x2 x1))) (+ y1 (* t (- y2 y1)))]))
+
+(defn- clip-against-edge [polygon a b]
+  (if (empty? polygon)
+    []
+    (let [inside? (fn [p] (>= (cross-2d a b p) 0.0))]
+      (loop [result [] prev (peek polygon) prev-in (inside? (peek polygon)) remaining polygon]
+        (if (empty? remaining)
+          result
+          (let [current (first remaining)
+                current-in (inside? current)
+                result (cond-> result
+                         (not= prev-in current-in)
+                         (conj (line-intersection-2d prev current a b))
+                         current-in (conj current))]
+            (recur result current current-in (rest remaining))))))))
+
+(defn sutherland-hodgman-clip
+  "Clip `subject` (any simple polygon) to the region inside `clip-polygon`
+  (must be convex and counter-clockwise), returning the (possibly empty)
+  intersection polygon."
+  [subject clip-polygon]
+  (reduce (fn [polygon edge] (clip-against-edge polygon (first edge) (second edge)))
+          subject
+          (map vector clip-polygon (concat (rest clip-polygon) [(first clip-polygon)]))))
+
 (defn- dimension-group [[x1 y1] [x2 y2] offset label]
   (let [dx (- x2 x1) dy (- y2 y1)
         length (#?(:clj Math/sqrt :cljs js/Math.sqrt) (+ (* dx dx) (* dy dy)))
@@ -236,6 +306,30 @@
        :vertical [(reduce min vertical) (reduce max vertical)]
        :depth [(reduce min depths) (reduce max depths)]})))
 
+(defn- mesh-projection-hull
+  "Convex hull of an element's mesh vertices projected onto the view plane
+  (horizontal-index, z). A convex hull is a conservative approximation of
+  the element's true silhouette -- concave footprints (an L-shaped wall, a
+  wall with an opening) are over-approximated, never under-approximated,
+  so hidden-line culling against it can only hide too little, not too
+  much."
+  [element horizontal-index]
+  (when-let [mesh (bim/element-mesh element)]
+    (convex-hull-2d (map (fn [p] [(nth p horizontal-index) (nth p 2)]) (:positions mesh)))))
+
+(defn- mostly-occluded?
+  "True when `hull` is covered by at least `threshold` (area fraction) of
+  its area by a single nearer hull already in `nearer-hulls`. This is a
+  single-occluder test -- it does not detect a farther element that is
+  fully covered only by the *union* of several nearer elements, none of
+  which individually covers enough of it."
+  [hull nearer-hulls threshold]
+  (let [area (polygon-area-2d hull)]
+    (and (pos? area)
+         (some (fn [nearer]
+                 (>= (/ (polygon-area-2d (sutherland-hodgman-clip hull nearer)) area) threshold))
+               nearer-hulls))))
+
 (defn- edge-plane-intersection [a b depth-index cut-position]
   (let [da (- (nth a depth-index) cut-position)
         db (- (nth b depth-index) cut-position)
@@ -278,9 +372,27 @@
                            [[(project (first points)) (project (second points))]]))))))
          distinct vec)))
 
+(def ^:private occlusion-threshold
+  "Fraction of a farther element's projected-hull area that must be covered
+  by a single nearer element's hull before the farther element is culled
+  as fully hidden -- see `mostly-occluded?`."
+  0.98)
+
 (defn orthographic-view
   "Generate a section or elevation from mesh bounds. Sections distinguish cut
-  objects from projected objects; elevations emit front-view silhouettes."
+  objects from projected objects; elevations emit front-view silhouettes.
+  With hidden-line? true (the default), a projected or elevation element
+  whose projected convex hull is almost entirely covered by a single
+  nearer element's hull is dropped -- real polygon overlap in any
+  orientation, not just axis-aligned bounding-box containment, so e.g. two
+  overlapping rotated/diamond footprints are handled correctly where a
+  bounding-box test would miss the occlusion. This is still a whole-
+  element, single-occluder decision (an element is either fully kept or
+  fully dropped; occlusion by the combined union of several nearer
+  elements, none of which alone covers enough of it, is not detected),
+  and hull silhouettes are conservative convex approximations, so concave
+  footprints (an L-shaped wall, a wall with an opening) can be culled less
+  than their true shape would justify but never more."
   [building {:keys [kind axis cut-position depth scale margin title hidden-line?
                     show-tags? annotations annotation-style crop view-id parent-view-id]
              :or {kind :section axis :x cut-position 0.0 depth 1000.0 scale 50
@@ -291,7 +403,8 @@
                         (when (category-visible? options element)
                           (when-let [mesh (bim/element-mesh element)]
                             (when-let [bounds (mesh-projection-bounds element horizontal-index)]
-                              {:element element :mesh mesh :bounds bounds}))))
+                              {:element element :mesh mesh :bounds bounds
+                               :hull (mesh-projection-hull element horizontal-index)}))))
                       (all-building-elements building))
         visible (filter (fn [{:keys [bounds]}]
                           (let [[near far] (:depth bounds)]
@@ -309,15 +422,19 @@
                             visible))
                   visible)
         visible (sort-by #(first (get-in % [:bounds :depth])) visible)
-        contained? (fn [outer inner]
-                     (and (<= (first (:horizontal outer)) (first (:horizontal inner)))
-                          (>= (second (:horizontal outer)) (second (:horizontal inner)))
-                          (<= (first (:vertical outer)) (first (:vertical inner)))
-                          (>= (second (:vertical outer)) (second (:vertical inner)))))
-        visible (if (and hidden-line? (= kind :elevation))
-                  (reduce (fn [result entry]
-                            (if (some #(contained? (:bounds %) (:bounds entry)) result)
-                              result (conj result entry))) [] visible)
+        cut-entry? (fn [{:keys [bounds]}]
+                     (let [[near far] (:depth bounds)]
+                       (and (= kind :section) (<= near cut-position) (<= cut-position far))))
+        visible (if hidden-line?
+                  (:kept (reduce (fn [{:keys [kept nearer-hulls]} entry]
+                                   (if (and (:hull entry) (not (cut-entry? entry))
+                                            (mostly-occluded? (:hull entry) nearer-hulls
+                                                              occlusion-threshold))
+                                     {:kept kept :nearer-hulls nearer-hulls}
+                                     {:kept (conj kept entry)
+                                      :nearer-hulls (cond-> nearer-hulls
+                                                      (:hull entry) (conj (:hull entry)))}))
+                                 {:kept [] :nearer-hulls []} visible))
                   visible)
         points (mapcat (fn [{:keys [bounds]}]
                          (let [[x0 x1] (:horizontal bounds) [z0 z1] (:vertical bounds)]
