@@ -165,3 +165,117 @@
          (structural/analyze-plane-stress-mesh
           (-> model
               (assoc-in [:nodes 2 :point] [2.0 0.0])))))))
+
+(defn- narrow-strip-mesh
+  "A cantilevered rectangular-strip triangle mesh (n divisions along x, one
+  division across y, clamped at x=0) for plate-bending convergence tests."
+  [n length width thickness-m elastic-modulus-pa poisson-ratio]
+  (let [dx (/ length n)
+        node-id (fn [i j] (keyword (str "n" i "-" j)))
+        nodes (for [i (range (inc n)) j (range 2)]
+                {:id (node-id i j) :point [(* i dx) (* j width)]
+                 :restraints (if (zero? i) [true true true] [false false false])})
+        elements (mapcat
+                  (fn [i]
+                    [{:id (keyword (str "e" i "a"))
+                      :nodes [(node-id i 0) (node-id (inc i) 0) (node-id i 1)]
+                      :thickness-m thickness-m :elastic-modulus-pa elastic-modulus-pa
+                      :poisson-ratio poisson-ratio}
+                     {:id (keyword (str "e" i "b"))
+                      :nodes [(node-id (inc i) 0) (node-id (inc i) 1) (node-id i 1)]
+                      :thickness-m thickness-m :elastic-modulus-pa elastic-modulus-pa
+                      :poisson-ratio poisson-ratio}])
+                  (range n))]
+    {:nodes (vec nodes) :elements (vec elements)
+     :tip-nodes [(node-id n 0) (node-id n 1)]}))
+
+(defn- cantilever-strip-tip-deflection [n thickness-m]
+  (let [length 2.0 width 0.1 elastic-modulus-pa 2.0e11 poisson-ratio 0.0 total-load 1000.0
+        mesh (narrow-strip-mesh n length width thickness-m elastic-modulus-pa poisson-ratio)
+        loads [{:node (first (:tip-nodes mesh)) :fz (/ total-load 2.0)}
+              {:node (second (:tip-nodes mesh)) :fz (/ total-load 2.0)}]
+        result (structural/analyze-plate-bending-mesh (assoc mesh :loads loads))]
+    (#?(:clj Math/abs :cljs js/Math.abs)
+     (get-in result [:structural.plate/nodes (first (:tip-nodes mesh)) :w]))))
+
+(deftest dkt-cantilever-strip-converges-without-thickness-dependent-locking
+  ;; A narrow strip with poisson-ratio 0 decouples exactly into independent
+  ;; beam-theory strips (no cross-direction/Poisson coupling), giving an
+  ;; exact classical reference: tip deflection = P*L^3/(3*E*I).
+  (let [length 2.0 width 0.1 thickness 0.02 elastic-modulus 2.0e11 total-load 1000.0
+        inertia (/ (* width thickness thickness thickness) 12.0)
+        classical (/ (* total-load length length length) (* 3.0 elastic-modulus inertia))
+        coarse (cantilever-strip-tip-deflection 4 thickness)
+        fine (cantilever-strip-tip-deflection 16 thickness)
+        coarse-error (/ (#?(:clj Math/abs :cljs js/Math.abs) (- coarse classical)) classical)
+        fine-error (/ (#?(:clj Math/abs :cljs js/Math.abs) (- fine classical)) classical)]
+    (is (< coarse-error 0.02))
+    (is (< fine-error 0.005))
+    (is (< fine-error coarse-error))
+    ;; a plain Reissner-Mindlin triangle (tried first, see the docstring on
+    ;; analyze-plate-bending-mesh) locks harder as span/thickness grows --
+    ;; DKT has no shear term to lock, so error at a fixed mesh must stay
+    ;; essentially constant across a 10x thickness range.
+    (let [thick-error (/ (#?(:clj Math/abs :cljs js/Math.abs)
+                          (- (cantilever-strip-tip-deflection 8 0.1)
+                             (/ (* total-load length length length)
+                                (* 3.0 elastic-modulus (/ (* width 0.1 0.1 0.1) 12.0)))))
+                         (/ (* total-load length length length)
+                            (* 3.0 elastic-modulus (/ (* width 0.1 0.1 0.1) 12.0))))
+          thin-error (/ (#?(:clj Math/abs :cljs js/Math.abs)
+                         (- (cantilever-strip-tip-deflection 8 0.01)
+                            (/ (* total-load length length length)
+                               (* 3.0 elastic-modulus (/ (* width 0.01 0.01 0.01) 12.0)))))
+                        (/ (* total-load length length length)
+                           (* 3.0 elastic-modulus (/ (* width 0.01 0.01 0.01) 12.0))))]
+      (is (< (#?(:clj Math/abs :cljs js/Math.abs) (- thick-error thin-error)) 1.0e-6)))))
+
+(defn- square-plate-mesh [n side thickness-m elastic-modulus-pa poisson-ratio]
+  (let [dx (/ side n)
+        node-id (fn [i j] (keyword (str "n" i "-" j)))
+        boundary? (fn [i j] (or (zero? i) (= i n) (zero? j) (= j n)))
+        nodes (for [i (range (inc n)) j (range (inc n))]
+                {:id (node-id i j) :point [(* i dx) (* j dx)]
+                 :restraints (if (boundary? i j) [true false false] [false false false])})
+        elements (mapcat
+                  (fn [[i j]]
+                    [{:id (keyword (str "e" i "-" j "a"))
+                      :nodes [(node-id i j) (node-id (inc i) j) (node-id i (inc j))]
+                      :thickness-m thickness-m :elastic-modulus-pa elastic-modulus-pa
+                      :poisson-ratio poisson-ratio}
+                     {:id (keyword (str "e" i "-" j "b"))
+                      :nodes [(node-id (inc i) j) (node-id (inc i) (inc j)) (node-id i (inc j))]
+                      :thickness-m thickness-m :elastic-modulus-pa elastic-modulus-pa
+                      :poisson-ratio poisson-ratio}])
+                  (for [i (range n) j (range n)] [i j]))]
+    {:nodes (vec nodes) :elements (vec elements)
+     :center (node-id (/ n 2) (/ n 2)) :cell-area (* dx dx)}))
+
+(defn- simply-supported-square-plate-center-deflection [n]
+  (let [side 4.0 thickness 0.05 elastic-modulus 2.0e11 poisson-ratio 0.3 pressure-pa 5000.0
+        mesh (square-plate-mesh n side thickness elastic-modulus poisson-ratio)
+        loads (for [i (range (inc n)) j (range (inc n))]
+                (let [edge-i (or (zero? i) (= i n)) edge-j (or (zero? j) (= j n))
+                      factor (cond (and edge-i edge-j) 0.25 (or edge-i edge-j) 0.5 :else 1.0)]
+                  {:node (keyword (str "n" i "-" j)) :fz (* factor pressure-pa (:cell-area mesh))}))
+        result (structural/analyze-plate-bending-mesh (assoc mesh :loads loads))]
+    (get-in result [:structural.plate/nodes (:center mesh) :w])))
+
+(deftest dkt-simply-supported-square-plate-matches-classical-center-deflection
+  ;; Timoshenko & Woinowsky-Krieger, "Theory of Plates and Shells": a
+  ;; simply-supported square plate under uniform pressure has center
+  ;; deflection alpha*q*a^4/D with alpha = 0.00406 for poisson-ratio 0.3 --
+  ;; this exercises genuine biaxial bending with active Poisson coupling,
+  ;; unlike the narrow-strip cantilever test above.
+  (let [side 4.0 thickness 0.05 elastic-modulus 2.0e11 poisson-ratio 0.3 pressure-pa 5000.0
+        rigidity (/ (* elastic-modulus thickness thickness thickness)
+                    (* 12.0 (- 1.0 (* poisson-ratio poisson-ratio))))
+        alpha 0.00406
+        classical (/ (* alpha pressure-pa (#?(:clj Math/pow :cljs js/Math.pow) side 4.0)) rigidity)
+        coarse (simply-supported-square-plate-center-deflection 4)
+        fine (simply-supported-square-plate-center-deflection 8)
+        coarse-error (/ (#?(:clj Math/abs :cljs js/Math.abs) (- coarse classical)) classical)
+        fine-error (/ (#?(:clj Math/abs :cljs js/Math.abs) (- fine classical)) classical)]
+    (is (< coarse-error 0.06))
+    (is (< fine-error 0.015))
+    (is (< fine-error coarse-error))))
