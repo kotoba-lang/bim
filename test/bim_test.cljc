@@ -1971,6 +1971,48 @@
     (is (= "Ss_25_10_30"
            (get-in edited-wall [:classifications 0 :identification])))))
 
+(deftest meshes-a-profile-with-its-own-2d-position
+  ;; a profile's own :position is an IfcAxis2Placement2D (planar, [x y]
+  ;; only) at least as often as a fully 3D one -- this must not crash,
+  ;; and the offset must actually apply to the meshed geometry.
+  (let [element {:id 1 :kind :proxy
+                 :geometry {:kind :extruded-area-solid
+                            :profile {:kind :rectangle :x-dim 2.0 :y-dim 1.0
+                                      :position {:location [5.0 3.0] :ref-direction [1.0 0.0]}}
+                            :position {:location [0.0 0.0 0.0]}
+                            :direction [0 0 1] :depth 4.0}}
+        mesh (bim/element-mesh element)]
+    (is (= 8 (count (:positions mesh))))
+    (is (some #(= [4.0 2.5 0.0] %) (:positions mesh))
+        "a profile-relative corner offset by the profile's own 2D position")))
+
+(deftest chains-multiple-perpendicular-half-space-clips-on-one-extrusion
+  ;; a mitered/notched extrusion end is commonly represented as several
+  ;; sequential IfcBooleanClippingResult (extrusion vs half-space)
+  ;; operations, not just one -- resolve-clipped-extrusion must chain
+  ;; through all of them, not only the first.
+  (let [element
+        {:id 1 :kind :proxy
+         :geometry
+         {:kind :boolean-result :operator :difference
+          :first-operand
+          {:kind :boolean-result :operator :difference
+           :first-operand {:kind :extruded-area-solid
+                           :profile {:kind :rectangle :x-dim 2.0 :y-dim 2.0}
+                           :position {:location [0.0 0.0 0.0]}
+                           :direction [0 0 1] :depth 10.0}
+           :second-operand {:kind :half-space-solid :agreement-flag false
+                            :base-surface {:kind :plane
+                                           :position {:location [0 0 2.0] :axis [0 0 1]}}}}
+          :second-operand {:kind :half-space-solid :agreement-flag true
+                           :base-surface {:kind :plane
+                                          :position {:location [0 0 8.0] :axis [0 0 1]}}}}}
+        mesh (bim/element-mesh element)
+        zs (map #(nth % 2) (:positions mesh))]
+    (is (= 8 (count (:positions mesh))))
+    (is (= 2.0 (apply min zs)))
+    (is (= 8.0 (apply max zs)))))
+
 (deftest imports-rotated-ifc-products-in-their-composed-coordinate-system
   (let [document {:ifc/schema "IFC4X3_ADD2"
                   :ifc/project {:id 1 :name "Rotated Tower" :type :ifcproject
