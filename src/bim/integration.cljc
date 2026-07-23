@@ -3138,14 +3138,24 @@
     (case (:kind element)
       :wall
       (when (contains? #{:bearing :shear-wall :structural} role)
-        (let [[[x1 y1 z1] [x2 y2 z2]] (analytical-axis element)
-              height (get-in element [:geometry :profile :height])]
-          {:structural.shell/id (:id element) :structural.shell/source-element-id (:id element)
-           :structural.shell/role role
-           :structural.shell/nodes [[x1 y1 z1] [x2 y2 z2]
-                                    [x2 y2 (+ z2 height)] [x1 y1 (+ z1 height)]]
-           :structural.shell/thickness-m (get-in element [:geometry :profile :thickness])
-           :structural.shell/material (:structural/material element)}))
+        (let [axis (analytical-axis element)
+              height (get-in element [:geometry :profile :height])
+              thickness (get-in element [:geometry :profile :thickness])]
+          ;; a wall's geometry is only shell-able when it carries the
+          ;; simple analytical axis + rectangular-profile shape this
+          ;; system authors (bim/wall); imported foreign geometry (e.g. a
+          ;; Revit boolean-clipped BREP) has no :geometry :profile at all,
+          ;; so skip rather than build a shell from missing dimensions.
+          (when (and (= 2 (count axis))
+                     (every? (fn [point] (and (= 3 (count point)) (every? number? point))) axis)
+                     (number? height) (number? thickness))
+            (let [[[x1 y1 z1] [x2 y2 z2]] axis]
+              {:structural.shell/id (:id element) :structural.shell/source-element-id (:id element)
+               :structural.shell/role role
+               :structural.shell/nodes [[x1 y1 z1] [x2 y2 z2]
+                                        [x2 y2 (+ z2 height)] [x1 y1 (+ z1 height)]]
+               :structural.shell/thickness-m thickness
+               :structural.shell/material (:structural/material element)}))))
       :slab
       (when (contains? #{:floor :diaphragm :structural} role)
         {:structural.shell/id (:id element) :structural.shell/source-element-id (:id element)
