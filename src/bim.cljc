@@ -1762,7 +1762,15 @@
 (declare wall-with-openings-mesh)
 (defn element-mesh [element]
   (case (:kind element)
-    :wall (wall-with-openings-mesh element)
+    ;; a wall's :geometry is only the axis+profile shape `wall`/
+    ;; `axis-sweep-geometry` author when :axis is present; a wall element
+    ;; carried through from a foreign IFC import (e.g. a Revit boolean-
+    ;; clipped BREP) has no :axis, so fall back to the generic mesher
+    ;; that already handles that representation directly -- same pattern
+    ;; already used for :slab below.
+    :wall (if (get-in element [:geometry :axis])
+            (wall-with-openings-mesh element)
+            (geometry-mesh (:geometry element)))
     :slab (if (= :slab-extrusion (get-in element [:geometry :kind]))
             (slab-mesh element) (geometry-mesh (:geometry element)))
     (geometry-mesh (:geometry element))))
