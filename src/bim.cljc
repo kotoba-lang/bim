@@ -1117,7 +1117,11 @@
         z-axis (v3-normalize (point3 (or (:axis position) [0.0 0.0 1.0])))
         x-axis (v3-normalize (point3 (or (:ref-direction position) [1.0 0.0 0.0])))
         y-axis (v3-normalize (v3-cross z-axis x-axis))
-        [px py pz] (get-in profile [:position :location] [0.0 0.0 0.0])
+        ;; a profile's own position is an IfcAxis2Placement2D (planar, no z)
+        ;; at least as often as a 3D one -- pad through point3 the same way
+        ;; every other point in this function already is, rather than
+        ;; destructuring a possibly-2-element vector into 3 bindings.
+        [px py pz] (point3 (get-in profile [:position :location]))
         boundary (mapv (fn [point]
                          (let [[x y z] (point3 point)]
                            (mapv + origin
@@ -1536,6 +1540,29 @@
               (assoc-in [:position :location]
                         (mapv + base (mapv #(* start %) direction)))))))))
 
+(defn- resolve-clipped-extrusion
+  "Resolve a chain of extrusion + half-space clipping operations -- the
+  standard IfcBooleanClippingResult pattern of SolidModel-vs-HalfSpaceSolid
+  difference/intersection only, which IFC restricts clipping results to
+  specifically so tools don't need general BREP boolean support -- down
+  to a single effective extruded-area-solid. A mitered/angled cut wall
+  end is typically two or more of these chained (one half-space per cut
+  plane); this recurses through however many are nested. Returns nil for
+  anything else (a real BREP boolean, a non-half-space second operand,
+  etc.), same as when there is simply no extrusion to resolve."
+  [geometry]
+  (case (:kind geometry)
+    :extruded-area-solid geometry
+    :boolean-result
+    (when (contains? #{:difference :intersection} (:operator geometry))
+      (let [second-operand (:second-operand geometry)]
+        (when (= :half-space-solid (:kind second-operand))
+          (some-> (resolve-clipped-extrusion (:first-operand geometry))
+                  (clipped-extrusion
+                   (cond-> second-operand
+                     (= :intersection (:operator geometry)) (update :agreement-flag not)))))))
+    nil))
+
 (defn- boolean-result-mesh [geometry]
   (let [first-operand (:first-operand geometry) second-operand (:second-operand geometry)
         first-mesh (geometry-mesh first-operand) second-mesh (geometry-mesh second-operand)]
@@ -1547,17 +1574,17 @@
       :difference
       (if (and first-mesh second-mesh)
         (mesh-csg/mesh-boolean :difference first-mesh second-mesh)
-        (when (and (= :extruded-area-solid (:kind first-operand))
-                   (= :half-space-solid (:kind second-operand)))
-          (some-> (clipped-extrusion first-operand second-operand) extruded-area-mesh)))
+        (when (= :half-space-solid (:kind second-operand))
+          (some-> (resolve-clipped-extrusion first-operand)
+                  (clipped-extrusion second-operand)
+                  extruded-area-mesh)))
       :intersection
       (if (and first-mesh second-mesh)
         (mesh-csg/mesh-boolean :intersection first-mesh second-mesh)
-        (when (and (= :extruded-area-solid (:kind first-operand))
-                   (= :half-space-solid (:kind second-operand)))
+        (when (= :half-space-solid (:kind second-operand))
           ;; Intersection is the complementary extrusion interval.
-          (some-> (clipped-extrusion first-operand
-                                     (update second-operand :agreement-flag not))
+          (some-> (resolve-clipped-extrusion first-operand)
+                  (clipped-extrusion (update second-operand :agreement-flag not))
                   extruded-area-mesh)))
       nil)))
 
