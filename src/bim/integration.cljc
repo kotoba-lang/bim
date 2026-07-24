@@ -2151,6 +2151,16 @@
                   :classification (or classification (:classification result))
                   :openings (if (= :slab (:kind source))
                               (imported-slab-openings source) (:openings result))
+                  ;; raw IfcRelVoidsElement-related products, independent of
+                  ;; whether :openings above got populated. attach-imported-
+                  ;; openings/bim/add-opening-to-wall only apply to walls
+                  ;; whose geometry is the simple axis+profile shape this
+                  ;; system authors -- an imported wall with complex
+                  ;; (e.g. BREP) geometry has known openings that cannot be
+                  ;; placed by that axis-relative offset/sill math, so this
+                  ;; preserves them (global-id, geometry, property sets)
+                  ;; rather than silently dropping the relationship.
+                  :ifc/openings (:openings source)
                   :psets (merge (:psets result) psets))
      (imported-family-metadata source))))
 
