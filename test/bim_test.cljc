@@ -2921,9 +2921,11 @@
   ;; mitered end represented as nested boolean-clipped half-space solids
   ;; and extensive Pset_Revit_* metadata. The source file also relates an
   ;; IfcOpeningElement to this wall via IfcRelVoidsElement; this scenario
-  ;; found that import-external-ifc does not currently carry that
-  ;; relationship into either the wall's :openings or a separate imported
-  ;; element (a further gap surfaced but not fixed here).
+  ;; originally found that import-external-ifc did not carry that
+  ;; relationship anywhere -- fixed since as a raw :ifc/openings record
+  ;; (the wall's geometry is too complex for the axis-relative offset/
+  ;; sill placement attach-imported-openings/add-opening-to-wall need, so
+  ;; this preserves the relationship without attempting full placement).
   (let [source-text (slurp "test/fixtures/external/revit2011_wall1.ifc")
         imported (integration/import-external-ifc (ifc-core/read-document source-text))
         storey (get-in imported [:sites 0 :buildings 0 :storeys 0])
@@ -2932,6 +2934,8 @@
     ;; sets intact, not just opaque geometry.
     (is (= :wall (:kind wall)))
     (is (= false (get-in wall [:psets "Pset_WallCommon" :props :LoadBearing :value])))
+    (is (= 1 (count (:ifc/openings wall))))
+    (is (= "03G9jZ_mz91eOLnxxTVuMo" (:global-id (first (:ifc/openings wall)))))
     (let [;; edit parameters: flip a Revit-authored property.
           edited-wall (assoc-in wall [:psets "Pset_WallCommon" :props :LoadBearing :value] true)
           ;; coordinate structural/drawings: this wall's real geometry is
