@@ -1,7 +1,7 @@
 (ns bim.editor
   "Pure BIM editor state: atomic serializable transactions, undo/redo,
   selection, and deterministic geometric snapping."
-  (:require [clojure.set :as set]))
+  (:require [kotoba.lang.coll :as coll]))
 
 (def schema-version 1)
 
@@ -90,8 +90,8 @@
    (let [ids (set ids)]
      (update state :editor/selection
              (fn [selection]
-               (case mode :replace ids :add (set/union selection ids)
-                     :remove (set/difference selection ids)
+               (case mode :replace ids :add (coll/set-union selection ids)
+                     :remove (coll/set-difference selection ids)
                      :toggle (reduce (fn [result id]
                                        (if (contains? result id) (disj result id) (conj result id)))
                                      selection ids)

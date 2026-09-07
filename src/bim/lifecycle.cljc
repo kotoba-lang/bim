@@ -1,6 +1,6 @@
 (ns bim.lifecycle
   "Construction phases, design options, revisions, and drawing issue records."
-  (:require [clojure.set :as set]))
+  (:require [kotoba.lang.coll :as coll]))
 
 (def schema-version 1)
 
@@ -72,7 +72,7 @@
   [state {:keys [id sheet-id revision-ids recipients timestamp] :as issue}]
   (let [revision-by-id (into {} (map (juxt :revision/id identity)
                                      (:lifecycle/revisions state)))
-        missing (set/difference (set revision-ids) (set (keys revision-by-id)))
+        missing (coll/set-difference (set revision-ids) (set (keys revision-by-id)))
         unissued (filter #(not (:revision/issued? (revision-by-id %))) revision-ids)]
     (when (seq missing)
       (throw (ex-info "sheet issue references missing revisions" {:revision-ids missing})))
