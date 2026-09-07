@@ -1,9 +1,8 @@
 (ns bim.integration
   "Portable contracts that connect BIM authoring, drawings, IFC exchange,
   collaboration, and cloud-itonami. All functions are pure and CLJC-safe."
-  (:require [clojure.set :as set]
-            [clojure.string :as string]
-            [clojure.walk :as walk]
+  (:require [clojure.string :as string]
+            [kotoba.lang.coll :as coll]
             [bim :as bim]
             [bim.mep :as mep]
             [bim.structural :as structural]
@@ -777,7 +776,7 @@
          formula-names (set (keys (:family/formulas family)))
          reporting-names (into #{} (keep (fn [[name spec]]
                                            (when (:reporting spec) name))) specs)]
-     (when-let [invalid (first (set/intersection formula-names reporting-names))]
+     (when-let [invalid (first (coll/set-intersection formula-names reporting-names))]
        (throw (ex-info "reporting parameter cannot also have a formula"
                        {:parameter invalid})))
      (when-let [formula-override
@@ -798,7 +797,7 @@
      (let [initial (apply dissoc
                           (merge (into {} (map (fn [[k spec]] [k (:default spec)]) specs))
                                  type-overrides overrides)
-                          (set/union formula-names reporting-names))
+                          (coll/set-union formula-names reporting-names))
            resolve-formulas
            (fn [params pending]
              (loop [params params pending pending]
@@ -977,7 +976,7 @@
   (let [params (resolve-family-parameters family type-key overrides (some? catalog))
         planes (resolve-reference-planes family params)
         sketches (resolve-family-sketches family params planes)
-        substituted (walk/postwalk #(cond
+        substituted (coll/postwalk #(cond
                                       (and (vector? %) (= :param (first %)))
                                       (get params (second %))
                                       (and (vector? %) (= :reference (first %)))
@@ -1059,7 +1058,7 @@
                       {:family-id (:family/id family)})))
     (let [path (cond-> points closed? (conj (first points)))
           instance (instantiate-family family instance-id overrides)]
-      (-> (walk/postwalk (fn [value]
+      (-> (coll/postwalk (fn [value]
                            (cond
                              (and (vector? value) (= :adaptive-point (first value)))
                              (or (get points (second value))
@@ -2387,7 +2386,7 @@
                  (fn [index load]
                    (-> load
                        (assoc :id (or (:id load) (str case-id "-M-" index)))
-                       (set/rename-keys {:fx :qx :fy :qy :fz :qz
+                       (coll/rename-keys {:fx :qx :fy :qy :fz :qz
                                          :mx :qmx :my :qmy :mz :qmz})))
                  (:structural.load-case/member-loads load-case))))}))
          (:structural/load-cases model))]
@@ -2437,7 +2436,7 @@
                            (dissoc :id :name :global-id :placement
                                    :global-or-local :destabilizing-load
                                    :projected-or-true :predefined-type)
-                           (set/rename-keys {:qx :fx :qy :fy :qz :fz
+                           (coll/rename-keys {:qx :fx :qy :fy :qz :fz
                                              :qmx :mx :qmy :my :qmz :mz}))
                       (filter :member loads))})))
           (:load-cases structural))

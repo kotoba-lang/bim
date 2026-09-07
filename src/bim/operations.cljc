@@ -1,7 +1,7 @@
 (ns bim.operations
   "Tenant-isolated BIM control-plane contracts for scoped access, tamper-
   evident audit, encrypted backups, retention, and disaster recovery."
-  (:require [clojure.set :as set]))
+  (:require [kotoba.lang.coll :as coll]))
 
 (def schema-version 1)
 (def role-scopes
@@ -37,7 +37,7 @@
         granted (get role-scopes role #{})
         requested (set requested-scopes)]
     (when-not (and role (number? issued-at) (number? expires-at) (< issued-at expires-at)
-                   (set/subset? requested granted))
+                   (coll/subset? requested granted))
       (throw (ex-info "invalid tenant principal request"
                       {:tenant-id tenant-id :actor actor :role role
                        :requested requested :granted granted})))

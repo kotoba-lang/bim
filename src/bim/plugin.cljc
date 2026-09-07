@@ -2,7 +2,7 @@
   "Capability-scoped extension API for BIM commands, validators, exporters,
   and lifecycle hooks. Manifests stay serializable; runtime handlers are kept
   in the host registry."
-  (:require [clojure.set :as set]))
+  (:require [kotoba.lang.coll :as coll]))
 
 (def api-version 1)
 (def known-capabilities
@@ -11,7 +11,7 @@
 
 (defn manifest
   [{:keys [id name version api-version-required capabilities contributions]}]
-  (let [required (set capabilities) unknown (set/difference required known-capabilities)]
+  (let [required (set capabilities) unknown (coll/set-difference required known-capabilities)]
     (when (or (not (string? id)) (empty? id) (seq unknown)
               (> (or api-version-required 1) api-version))
       (throw (ex-info "invalid BIM plugin manifest"
@@ -38,7 +38,7 @@
   [host plugin-manifest handlers]
   (let [id (:plugin/id plugin-manifest)
         required (:plugin/capabilities plugin-manifest)
-        denied (set/difference required (:plugin-host/allowed-capabilities host))
+        denied (coll/set-difference required (:plugin-host/allowed-capabilities host))
         contribution-ids
         (into #{}
               (map :id)
@@ -51,8 +51,8 @@
                       {:plugin-id id :denied denied})))
     (when-not (= contribution-ids handler-ids)
       (throw (ex-info "BIM plugin handlers do not match contributions"
-                      {:plugin-id id :missing (set/difference contribution-ids handler-ids)
-                       :undeclared (set/difference handler-ids contribution-ids)})))
+                      {:plugin-id id :missing (coll/set-difference contribution-ids handler-ids)
+                       :undeclared (coll/set-difference handler-ids contribution-ids)})))
     (-> host
         (assoc-in [:plugin-host/plugins id] plugin-manifest)
         (assoc-in [:plugin-host/handlers id] handlers))))
