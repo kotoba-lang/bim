@@ -2,7 +2,7 @@
   (:require [bim :as bim]
             [bim.regeneration :as regeneration]
             [clojure.test :refer [deftest is]]
-            [clojure.string :as string]
+            [kotoba.lang.text :as string]
             [kotoba.document.artifact-graph :as artifact-graph]))
 
 (defn- project-with-wall [length]

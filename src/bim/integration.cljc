@@ -1,7 +1,7 @@
 (ns bim.integration
   "Portable contracts that connect BIM authoring, drawings, IFC exchange,
   collaboration, and cloud-itonami. All functions are pure and CLJC-safe."
-  (:require [clojure.string :as string]
+  (:require [kotoba.lang.text :as string]
             [kotoba.lang.coll :as coll]
             [bim :as bim]
             [bim.mep :as mep]
@@ -101,7 +101,7 @@
    "DEGREES" (/ pi 180.0) "RADIANS" 1.0})
 
 (defn- catalog-value-scale [spec unit]
-  (let [scale (get catalog-unit-scale (string/upper-case (or unit "")) 1.0)]
+  (let [scale (get catalog-unit-scale (string/upper (or unit "")) 1.0)]
     (case (:type spec) :area (* scale scale) :volume (* scale scale scale) scale)))
 
 (defn- parse-catalog-value [spec unit value]
@@ -109,7 +109,7 @@
                         (#?(:clj Double/parseDouble :cljs js/parseFloat) %))
         scale (catalog-value-scale spec unit)]
     (case (:type spec)
-      :boolean (contains? #{"1" "true" "yes"} (string/lower-case value))
+      :boolean (contains? #{"1" "true" "yes"} (string/lower value))
       :integer (long (number-value value))
       (:length :angle :area :volume :number) (some-> (number-value value) (* scale))
       :enum (let [allowed (:allowed spec)]
@@ -128,7 +128,7 @@
             (when-not (= (count header) (count row))
               (throw (ex-info "type catalog row has the wrong column count"
                               {:row row :expected (count header)}))))
-        type-keys (mapv #(-> (first %) string/lower-case
+        type-keys (mapv #(-> (first %) string/lower
                              (string/replace #"[^a-z0-9]+" "-") keyword)
                         (rest rows))
         _ (when-not (= (count type-keys) (count (distinct type-keys)))
@@ -136,7 +136,7 @@
                             {:types type-keys})))
         descriptors (mapv (fn [cell]
                             (let [[parameter value-type unit] (string/split cell #"##" -1)]
-                              {:parameter (-> parameter string/lower-case
+                              {:parameter (-> parameter string/lower
                                               (string/replace #"[^a-z0-9]+" "-") keyword)
                                :value-type value-type :unit unit}))
                           (rest header))
@@ -144,7 +144,7 @@
         (into {}
               (map (fn [row]
                      (let [type-name (first row)
-                           type-key (-> type-name string/lower-case
+                           type-key (-> type-name string/lower
                                         (string/replace #"[^a-z0-9]+" "-") keyword)
                            parameters
                            (into {}
@@ -1623,7 +1623,7 @@
         (:psets element)))
 
 (defn- quantity-kind [quantity-name]
-  (let [name (string/lower-case (clojure.core/name quantity-name))]
+  (let [name (string/lower (clojure.core/name quantity-name))]
     (cond
       (string/includes? name "area") :area
       (string/includes? name "volume") :volume
@@ -2009,7 +2009,7 @@
   (mapv (fn [layer]
           (let [category (some-> (or (:category layer)
                                      (get-in layer [:material :category]))
-                                 string/lower-case keyword)
+                                 string/lower keyword)
                 category (if (contains? bim/material-categories category)
                            category :other)]
             (bim/material-layer (get-in layer [:material :name])

@@ -1,7 +1,7 @@
 (ns bim.interchange.dwg
   "Verified DWG export through an explicitly configured DXF→DWG converter."
   (:require [bim.interchange :as interchange]
-            [clojure.string :as string])
+            [kotoba.lang.text :as string])
   (:import [java.nio.charset StandardCharsets]
            [java.nio.file Files Path StandardOpenOption]
            [java.nio.file.attribute FileAttribute]))

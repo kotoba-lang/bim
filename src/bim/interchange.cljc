@@ -1,6 +1,6 @@
 (ns bim.interchange
   "BIM drawing export through shared kotoba-lang DXF and ISO PDF libraries."
-  (:require [clojure.string :as string]
+  (:require [kotoba.lang.text :as string]
             [bim :as bim]
             [dxf.core :as dxf]
             [bim.drawing :as drawing]

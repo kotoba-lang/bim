@@ -1,7 +1,7 @@
 (ns bim.drawing
   "BIM-to-SVG projection. XML/SVG rendering is owned by kotoba-lang/svg."
   (:require [bim :as bim]
-            [clojure.string :as string]
+            [kotoba.lang.text :as string]
             [svg.core :as svg]
             [svg.shapes :as shapes]))
 
@@ -479,7 +479,7 @@
                             cut-segments)))
                (when show-tags?
                  (shapes/text (/ (+ (sx x0) (sx x1)) 2.0) (- (sz z1) 4)
-                              (str (string/upper-case (subs (name (:kind element)) 0 1))
+                              (str (string/upper (subs (name (:kind element)) 0 1))
                                    (:id element))
                               {:class "element-tag" :text-anchor "middle" :font-size 9}))])
             (annotation-groups annotations sx sz annotation-style)))))
@@ -554,7 +554,7 @@
                             {:font-family "sans-serif" :font-size 14})
                (shapes/text (+ title-x 10) (+ title-y 38)
                             (str number " · " revision " · "
-                                 (string/upper-case (clojure.core/name size)))
+                                 (string/upper (clojure.core/name size)))
                             {:font-family "sans-serif" :font-size 10})]
               (map-indexed
                (fn [index [label value]]
