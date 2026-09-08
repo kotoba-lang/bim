@@ -2,7 +2,7 @@
   "Restoration-fidelity tests — one per original kami-bim Rust test
   (kami-engine/kami-bim/src/lib.rs `mod tests`, deleted PR #82)."
   (:require [clojure.test :refer [deftest is testing]]
-            [clojure.string :as string]
+            [kotoba.lang.text :as string]
             [bim]
             [bim.integration :as integration]
             [bim.ifc :as ifc]

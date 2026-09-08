@@ -1,5 +1,5 @@
 (ns bim.operations-test
-  (:require [clojure.string :as string]
+  (:require [kotoba.lang.text :as string]
             [clojure.test :refer [deftest is]]
             [bim.operations :as operations]
             #?(:clj [clojure.edn :as edn]
