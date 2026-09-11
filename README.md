@@ -25,7 +25,7 @@ signature, so ASCII DXF content is never mislabeled as DWG.
 
 Restored — the single-namespace data model ported from the original
 465-line Rust `lib.rs`, with both original Rust unit tests mirrored 1:1
-in `test/bim_test.cljc` (+1 smoke test) — 3 tests / 6 assertions, 0
+in `test/bim_test.cljk` (+1 smoke test) — 3 tests / 6 assertions, 0
 failures. Pure data + pure functions throughout; no IO/GPU. The
 original's serde-JSON round-trip test is adapted to a direct nested-
 hierarchy construction check — EDN maps are already the data, no

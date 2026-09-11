@@ -4,7 +4,7 @@
 export (`FILE_NAME` application string: `Autodesk Revit Architecture 2011 -
 1.0`), used unmodified as the origin model for the ADR-2607211437 gap-order
 item 6 acceptance scenario (`revit-origin-model-acceptance-scenario` in
-`test/bim_test.cljc`): import a real Revit-authored wall, edit its
+`test/bim_test.cljk`): import a real Revit-authored wall, edit its
 properties, coordinate structural analysis and a drawing, export, reopen
 the export with an independent parse, and compare semantics.
 
