@@ -34,5 +34,5 @@ serialize/deserialize step is needed to prove the model holds together.
 ## Develop
 
 ```bash
-clojure -M:test
+kbb -M:test
 ```
