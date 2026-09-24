@@ -2,7 +2,7 @@
   (:require [kotoba.lang.text :as string]
             [kotoba.test :refer [deftest is]]
             [bim.operations :as operations]
-            #?(:clj [clojure.edn :as edn]
+            #?(:clj [kotoba.lang.edn :as edn]
                :cljs [cljs.reader :as edn])))
 
 (defn digest [text] (str "digest:" (hash text)))
