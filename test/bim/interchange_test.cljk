@@ -1,6 +1,6 @@
 (ns bim.interchange-test
   (:require [kotoba.lang.text :as string]
-            [clojure.test :refer [deftest is]]
+            [kotoba.test :refer [deftest is]]
             [bim :as bim]
             [bim.interchange :as interchange]
             [pdf.core :as pdf]))

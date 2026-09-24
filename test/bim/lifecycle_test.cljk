@@ -1,5 +1,5 @@
 (ns bim.lifecycle-test
-  (:require [clojure.test :refer [deftest is]]
+  (:require [kotoba.test :refer [deftest is]]
             [bim.lifecycle :as lifecycle]))
 
 (def state

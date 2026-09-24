@@ -1,5 +1,5 @@
 (ns bim.worksharing-test
-  (:require [clojure.test :refer [deftest is]]
+  (:require [kotoba.test :refer [deftest is]]
             [bim.worksharing :as worksharing]))
 
 (deftest leases-permissions-and-semantic-conflicts

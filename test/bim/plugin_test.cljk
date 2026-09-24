@@ -1,5 +1,5 @@
 (ns bim.plugin-test
-  (:require [clojure.test :refer [deftest is]]
+  (:require [kotoba.test :refer [deftest is]]
             [bim.plugin :as plugin]))
 
 (def sample-manifest
