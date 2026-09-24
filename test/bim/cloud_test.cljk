@@ -1,5 +1,5 @@
 (ns bim.cloud-test
-  (:require [clojure.test :refer [deftest is]]
+  (:require [kotoba.test :refer [deftest is]]
             [bim.cloud :as cloud]))
 
 (deftest resumable-upload-is-idempotent-and-integrity-checked

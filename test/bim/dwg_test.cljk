@@ -1,7 +1,7 @@
 (ns bim.dwg-test
   (:require [bim :as bim]
             [bim.interchange.dwg :as dwg]
-            [clojure.test :refer [deftest is]])
+            [kotoba.test :refer [deftest is]])
   (:import [java.nio.charset StandardCharsets]
            [java.nio.file Files StandardOpenOption]
            [java.nio.file.attribute FileAttribute]))

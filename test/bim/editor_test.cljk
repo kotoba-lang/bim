@@ -1,5 +1,5 @@
 (ns bim.editor-test
-  (:require [clojure.test :refer [deftest is]]
+  (:require [kotoba.test :refer [deftest is]]
             [bim.editor :as editor]))
 
 (deftest transactions-are-atomic-and-undoable

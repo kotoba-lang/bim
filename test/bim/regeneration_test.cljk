@@ -1,7 +1,7 @@
 (ns bim.regeneration-test
   (:require [bim :as bim]
             [bim.regeneration :as regeneration]
-            [clojure.test :refer [deftest is]]
+            [kotoba.test :refer [deftest is]]
             [kotoba.lang.text :as string]
             [kotoba.document.artifact-graph :as artifact-graph]))
 

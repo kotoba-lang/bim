@@ -1,6 +1,6 @@
 (ns bim.cloud-http-test
   (:require [bim.cloud.http :as cloud-http]
-            [clojure.test :refer [deftest is]]
+            [kotoba.test :refer [deftest is]]
             [kotoba.issue.opencde.http :as http]))
 
 (deftest publishes-ifc-before-ordered-bcf-topics

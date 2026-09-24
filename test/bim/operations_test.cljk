@@ -1,6 +1,6 @@
 (ns bim.operations-test
   (:require [kotoba.lang.text :as string]
-            [clojure.test :refer [deftest is]]
+            [kotoba.test :refer [deftest is]]
             [bim.operations :as operations]
             #?(:clj [clojure.edn :as edn]
                :cljs [cljs.reader :as edn])))

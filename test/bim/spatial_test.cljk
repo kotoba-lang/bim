@@ -1,5 +1,5 @@
 (ns bim.spatial-test
-  (:require [clojure.test :refer [deftest is]]
+  (:require [kotoba.test :refer [deftest is]]
             [bim :as bim]
             [bim.spatial :as spatial]))
 

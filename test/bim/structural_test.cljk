@@ -1,5 +1,5 @@
 (ns bim.structural-test
-  (:require [clojure.test :refer [deftest is]]
+  (:require [kotoba.test :refer [deftest is]]
             [bim.structural :as structural]))
 
 (deftest combines-and-envelopes-structural-results
