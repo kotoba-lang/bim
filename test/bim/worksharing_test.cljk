@@ -75,21 +75,21 @@
     (is (= [2] (mapv :revision
                      (:worksharing/transactions
                       (worksharing/changes-since state-b 1)))))
-    (is (thrown-with-msg? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+    (is (thrown-with-msg? js/Error
                           #"id conflicts"
                           (worksharing/submit
                            state-a "alice" 1 120
                            {:id "tx-a" :transaction/element-ids [10]
                             :operations [{:op :set :path [:elements 10 :name]
                                           :value "Different"}]})))
-    (is (thrown-with-msg? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+    (is (thrown-with-msg? js/Error
                           #"sequence"
                           (worksharing/heartbeat presence "alice" 121
                                                  {:sequence 2 :selection []})))
-    (is (thrown-with-msg? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+    (is (thrown-with-msg? js/Error
                           #"not authorized"
                           (worksharing/checkout initial "reviewer" [10] 100 60)))
-    (is (thrown-with-msg? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+    (is (thrown-with-msg? js/Error
                           #"checked out"
                           (worksharing/checkout checked-out "bob" [10] 110 60)))
     (is (empty? (:worksharing/leases

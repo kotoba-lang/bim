@@ -18,7 +18,7 @@
     (is (seq (cloud/missing-chunks partial)))
     (is (= :complete (:upload/status completed)))
     (is (= content (:upload/content completed)))
-    (is (thrown-with-msg? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+    (is (thrown-with-msg? js/Error
                           #"checksum mismatch"
                           (cloud/receive-chunk
                            (cloud/receiver upload)
