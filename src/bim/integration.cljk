@@ -3661,7 +3661,7 @@
                                (>= (:mep.equipment/flow-m3-s point) required-flow-m3-s)
                                (>= (:mep.equipment/pressure-pa point) required-pressure-pa))
                       point))
-                  (catch #?(:clj clojure.lang.ExceptionInfo :cljs js/Error) _ nil)))
+                  (catch js/Error _ nil)))
               catalog)]
     (when-not (seq candidates)
       (throw (ex-info "no MEP equipment satisfies the design duty"

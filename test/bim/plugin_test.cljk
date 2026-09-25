@@ -40,11 +40,11 @@
     (is (empty? (:plugin-host/plugins (plugin/uninstall host "com.example.qa"))))))
 
 (deftest denied-capabilities-and-invalid-handlers-fail-installation
-  (is (thrown-with-msg? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+  (is (thrown-with-msg? js/Error
                         #"capabilities are denied"
                         (plugin/install (plugin/host #{:model/read})
                                         sample-manifest handlers)))
-  (is (thrown-with-msg? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+  (is (thrown-with-msg? js/Error
                         #"handlers do not match"
                         (plugin/install (plugin/host) sample-manifest
                                         (dissoc handlers :report)))))

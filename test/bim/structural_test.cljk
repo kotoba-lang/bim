@@ -160,7 +160,7 @@
     (is (= (get-in result [:structural.plane-stress/elements :t1 :stress-pa])
            (get-in clockwise [:structural.plane-stress/elements :t1 :stress-pa])))
     (is (thrown-with-msg?
-         #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+         js/Error
          #"zero area"
          (structural/analyze-plane-stress-mesh
           (-> model

@@ -190,7 +190,7 @@
     (is (true? (:electrical.coordination/coordinated? coordinated)))
     (is (false? (:electrical.coordination/coordinated? uncoordinated)))
     (is (thrown-with-msg?
-         #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+         js/Error
          #"no protective device"
          (mep/select-protective-device analysis
                                        [{:id :undersized :rating-a 50.0

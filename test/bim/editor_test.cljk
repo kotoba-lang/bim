@@ -17,7 +17,7 @@
     (is (= (:editor/document initial) (:editor/document undone)))
     (is (= (:editor/document changed) (:editor/document redone)))
     (is (empty? (:editor/redo redone)))
-    (is (thrown-with-msg? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+    (is (thrown-with-msg? js/Error
                           #"out of bounds"
                           (editor/transact initial {:operations [{:op :remove
                                                                   :path [:elements]
